@@ -1,0 +1,311 @@
+#include "desktop.h"
+#include <shellapi.h>
+#include <shlobj.h>
+#include <algorithm>
+
+#pragma comment(lib, "shell32.lib")
+
+static constexpr wchar_t kDesktopClassName[] = L"LlaShell_Desktop";
+static constexpr int kIconSize       = 48;
+static constexpr int kIconSpacingX   = 90;
+static constexpr int kIconSpacingY   = 90;
+static constexpr int kIconPadX       = 10;
+static constexpr int kIconPadY       = 10;
+static constexpr int kTextHeight     = 32;
+
+namespace LlaShell {
+
+DesktopWindow::DesktopWindow()
+    : m_hwnd(nullptr)
+    , m_hInstance(nullptr)
+    , m_running(false)
+    , m_iconSize(kIconSize)
+    , m_iconSpacingX(kIconSpacingX)
+    , m_iconSpacingY(kIconSpacingY)
+    , m_font(nullptr)
+    , m_bgBrush(nullptr)
+{
+}
+
+DesktopWindow::~DesktopWindow() {
+    Shutdown();
+}
+
+bool DesktopWindow::Create(HINSTANCE hInstance) {
+    m_hInstance = hInstance;
+
+    WNDCLASSEXW wc{};
+    wc.cbSize        = sizeof(wc);
+    wc.style         = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc   = WndProc;
+    wc.hInstance      = hInstance;
+    wc.hCursor        = LoadCursor(nullptr, IDC_ARROW);
+    wc.lpszClassName  = kDesktopClassName;
+    wc.hbrBackground  = nullptr;
+    RegisterClassExW(&wc);
+
+    int screenW = GetSystemMetrics(SM_CXSCREEN);
+    int screenH = GetSystemMetrics(SM_CYSCREEN);
+
+    m_hwnd = CreateWindowExW(
+        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        kDesktopClassName,
+        L"LlaShell Desktop",
+        WS_POPUP,
+        0, 0, screenW, screenH,
+        nullptr, nullptr, hInstance, this
+    );
+
+    if (!m_hwnd) return false;
+
+    SetWindowLongPtrW(m_hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+
+    m_bgBrush = CreateSolidBrush(RGB(30, 30, 46));
+    m_font = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+
+    m_running = true;
+    m_worker = std::thread(&DesktopWindow::WorkerThread, this);
+
+    ScanDesktopFolder();
+
+    SetWindowPos(m_hwnd, HWND_BOTTOM, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+    return true;
+}
+
+void DesktopWindow::Show() {
+    if (m_hwnd) {
+        ShowWindow(m_hwnd, SW_SHOW);
+        UpdateWindow(m_hwnd);
+    }
+}
+
+void DesktopWindow::Shutdown() {
+    m_running = false;
+
+    if (m_worker.joinable()) {
+        m_worker.join();
+    }
+
+    if (m_font) { DeleteObject(m_font); m_font = nullptr; }
+    if (m_bgBrush) { DeleteObject(m_bgBrush); m_bgBrush = nullptr; }
+
+    {
+        std::lock_guard<std::mutex> lock(m_iconMutex);
+        for (auto& icon : m_icons) {
+            if (icon.hIcon) DestroyIcon(icon.hIcon);
+        }
+        m_icons.clear();
+    }
+
+    if (m_hwnd) {
+        DestroyWindow(m_hwnd);
+        m_hwnd = nullptr;
+    }
+
+    UnregisterClassW(kDesktopClassName, m_hInstance);
+}
+
+void DesktopWindow::ScanDesktopFolder() {
+    wchar_t desktopPath[MAX_PATH];
+    if (SHGetFolderPathW(nullptr, CSIDL_DESKTOPDIRECTORY, nullptr, 0, desktopPath) != S_OK) {
+        if (SHGetFolderPathW(nullptr, CSIDL_DESKTOP, nullptr, 0, desktopPath) != S_OK)
+            return;
+    }
+
+    std::vector<DesktopIcon> newIcons;
+    WIN32_FIND_DATAW fd;
+    std::wstring search = std::wstring(desktopPath) + L"\\*";
+    HANDLE hFind = FindFirstFileW(search.c_str(), &fd);
+
+    if (hFind == INVALID_HANDLE_VALUE) return;
+
+    int col = 0, row = 0;
+    int maxRows = (GetSystemMetrics(SM_CYSCREEN) - 20) / kIconSpacingY;
+
+    do {
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0)
+            continue;
+
+        DesktopIcon icon;
+        icon.name = fd.cFileName;
+        icon.fullPath = std::wstring(desktopPath) + L"\\" + fd.cFileName;
+        icon.isDirectory = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        icon.gridX = col;
+        icon.gridY = row;
+        icon.hIcon = nullptr;
+
+        SHFILEINFOW sfi{};
+        SHGetFileInfoW(icon.fullPath.c_str(), 0, &sfi, sizeof(sfi),
+            SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES);
+        icon.hIcon = sfi.hIcon;
+
+        newIcons.push_back(icon);
+
+        row++;
+        if (row >= maxRows) {
+            row = 0;
+            col++;
+        }
+    } while (FindNextFileW(hFind, &fd));
+
+    FindClose(hFind);
+
+    std::lock_guard<std::mutex> lock(m_iconMutex);
+    for (auto& old : m_icons) {
+        if (old.hIcon) DestroyIcon(old.hIcon);
+    }
+    m_icons = std::move(newIcons);
+
+    if (m_hwnd) InvalidateRect(m_hwnd, nullptr, TRUE);
+}
+
+void DesktopWindow::RenderIcons(HDC hdc, const RECT& rc) {
+    HBRUSH bgBrush = CreateSolidBrush(RGB(30, 30, 46));
+    FillRect(hdc, &rc, bgBrush);
+    DeleteObject(bgBrush);
+
+    std::lock_guard<std::mutex> lock(m_iconMutex);
+
+    HFONT oldFont = (HFONT)SelectObject(hdc, m_font);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, RGB(220, 220, 220));
+
+    for (const auto& icon : m_icons) {
+        int x = kIconPadX + icon.gridX * kIconSpacingX;
+        int y = kIconPadY + icon.gridY * kIconSpacingY;
+
+        if (icon.hIcon) {
+            DrawIconEx(hdc, x + (kIconSpacingX - m_iconSize) / 2, y,
+                       icon.hIcon, m_iconSize, m_iconSize, 0, nullptr, DI_NORMAL);
+        }
+
+        RECT textRc = { x, y + m_iconSize + 2, x + kIconSpacingX, y + kIconSpacingY };
+        DrawTextW(hdc, icon.name.c_str(), -1, &textRc,
+            DT_CENTER | DT_WORDBREAK | DT_END_ELLIPSIS);
+    }
+
+    SelectObject(hdc, oldFont);
+}
+
+void DesktopWindow::HandleDoubleClick(int x, int y) {
+    std::lock_guard<std::mutex> lock(m_iconMutex);
+    for (const auto& icon : m_icons) {
+        int ix = kIconPadX + icon.gridX * kIconSpacingX;
+        int iy = kIconPadY + icon.gridY * kIconSpacingY;
+
+        if (x >= ix && x < ix + kIconSpacingX &&
+            y >= iy && y < iy + kIconSpacingY) {
+            if (icon.isDirectory) {
+                ShellExecuteW(m_hwnd, L"open", icon.fullPath.c_str(),
+                    nullptr, nullptr, SW_SHOW);
+            } else {
+                ShellExecuteW(m_hwnd, nullptr, icon.fullPath.c_str(),
+                    nullptr, nullptr, SW_SHOW);
+            }
+            break;
+        }
+    }
+}
+
+void DesktopWindow::HandleRightClick(int x, int y) {
+    POINT pt = { x, y };
+    ClientToScreen(m_hwnd, &pt);
+
+    HMENU hMenu = CreatePopupMenu();
+    AppendMenuW(hMenu, MF_STRING, 1, L"刷新桌面");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(hMenu, MF_STRING, 2, L"新建文件夹");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(hMenu, MF_STRING, 3, L"显示设置");
+    AppendMenuW(hMenu, MF_STRING, 4, L"关于 LlaShell");
+
+    SetForegroundWindow(m_hwnd);
+    int cmd = TrackPopupMenu(hMenu, TPM_RIGHTBUTTON | TPM_RETURNCMD,
+                             pt.x, pt.y, 0, m_hwnd, nullptr);
+    DestroyMenu(hMenu);
+
+    switch (cmd) {
+    case 1:
+        ScanDesktopFolder();
+        break;
+    case 2: {
+        wchar_t desktopPath[MAX_PATH];
+        if (SHGetFolderPathW(nullptr, CSIDL_DESKTOPDIRECTORY, nullptr, 0, desktopPath) == S_OK) {
+            std::wstring newPath = std::wstring(desktopPath) + L"\\新建文件夹";
+            CreateDirectoryW(newPath.c_str(), nullptr);
+            ScanDesktopFolder();
+        }
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+void DesktopWindow::WorkerThread() {
+    while (m_running) {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        if (m_running) {
+            ScanDesktopFolder();
+        }
+    }
+}
+
+LRESULT CALLBACK DesktopWindow::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    DesktopWindow* self = reinterpret_cast<DesktopWindow*>(
+        GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+
+    switch (msg) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hWnd, &ps);
+        if (self) self->RenderIcons(hdc, ps.rcPaint);
+        EndPaint(hWnd, &ps);
+        return 0;
+    }
+    case WM_LBUTTONDBLCLK:
+        if (self) self->HandleDoubleClick(LOWORD(lParam), HIWORD(lParam));
+        return 0;
+    case WM_RBUTTONUP:
+        if (self) self->HandleRightClick(LOWORD(lParam), HIWORD(lParam));
+        return 0;
+    case WM_DISPLAYCHANGE:
+        if (self && self->m_hwnd) {
+            int w = GetSystemMetrics(SM_CXSCREEN);
+            int h = GetSystemMetrics(SM_CYSCREEN);
+            SetWindowPos(self->m_hwnd, HWND_BOTTOM, 0, 0, w, h,
+                SWP_NOMOVE | SWP_NOACTIVATE);
+            self->ScanDesktopFolder();
+        }
+        return 0;
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    default:
+        return DefWindowProcW(hWnd, msg, wParam, lParam);
+    }
+}
+
+} // namespace LlaShell
+
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+    LlaShell::DesktopWindow desktop;
+    if (!desktop.Create(hInstance)) return 1;
+    desktop.Show();
+
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    desktop.Shutdown();
+    CoUninitialize();
+    return 0;
+}

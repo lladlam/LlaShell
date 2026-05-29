@@ -50,3 +50,96 @@ if(MSVC)
 else()
     target_sources(CoreIPC PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/CoreIPC/coreipc.def)
 endif()
+
+# --- Shared include directory ---
+set(SHARED_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Shared)
+
+# --- Desktop.exe ---
+add_executable(Desktop WIN32
+    Desktop/src/desktop_main.cpp
+)
+target_include_directories(Desktop PRIVATE
+    Desktop/include
+    ${SHARED_INCLUDE_DIR}
+)
+target_link_libraries(Desktop PRIVATE
+    CoreIPC
+    shell32
+    gdi32
+    ole32
+)
+if(NOT MSVC)
+    target_link_options(Desktop PRIVATE -municode)
+endif()
+
+# --- Taskbar.exe ---
+add_executable(Taskbar WIN32
+    Taskbar/src/taskbar_main.cpp
+)
+target_include_directories(Taskbar PRIVATE
+    Taskbar/include
+    ${SHARED_INCLUDE_DIR}
+)
+target_link_libraries(Taskbar PRIVATE
+    CoreIPC
+    shell32
+    gdi32
+    comctl32
+)
+if(NOT MSVC)
+    target_link_options(Taskbar PRIVATE -municode)
+endif()
+
+# --- MainUI.exe ---
+add_executable(MainUI WIN32
+    MainUI/src/mainui_main.cpp
+)
+target_include_directories(MainUI PRIVATE
+    MainUI/include
+    ${SHARED_INCLUDE_DIR}
+)
+target_link_libraries(MainUI PRIVATE
+    CoreIPC
+    shell32
+    shlwapi
+    gdi32
+    comctl32
+    ole32
+)
+if(NOT MSVC)
+    target_link_options(MainUI PRIVATE -municode)
+endif()
+
+# --- ShellHost.exe ---
+add_executable(ShellHost
+    ShellHost/src/shellhost_main.cpp
+)
+target_include_directories(ShellHost PRIVATE
+    ${SHARED_INCLUDE_DIR}
+)
+target_link_libraries(ShellHost PRIVATE
+    CoreIPC
+    shell32
+    shlwapi
+    ole32
+)
+if(NOT MSVC)
+    target_link_options(ShellHost PRIVATE -municode)
+endif()
+
+# --- MediaParser.exe ---
+add_executable(MediaParser
+    MediaParser/src/mediaparser_main.cpp
+)
+target_include_directories(MediaParser PRIVATE
+    ${SHARED_INCLUDE_DIR}
+)
+target_link_libraries(MediaParser PRIVATE
+    CoreIPC
+    gdi32
+    shell32
+    comctl32
+)
+if(NOT MSVC)
+    target_link_options(MediaParser PRIVATE -municode)
+endif()
