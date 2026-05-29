@@ -1,0 +1,18 @@
+LIBRARY CoreIPC
+
+EXPORTS
+    IPC_Initialize
+    IPC_Shutdown
+    IPC_Connect
+    IPC_Disconnect
+    IPC_Send
+    IPC_Broadcast
+    IPC_WatchProcess
+    IPC_UnwatchProcess
+    IPC_ShmCreate
+    IPC_ShmOpen
+    IPC_ShmClose
+    IPC_ShmWrite
+    IPC_ShmReadPtr
+    IPC_ShmMarkRead
+    IPC_CRC32
