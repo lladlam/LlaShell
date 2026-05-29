@@ -36,6 +36,7 @@ public:
 
     Result Send(SessionId to, MsgType type, const void* data, uint32_t size);
     Result Broadcast(MsgType type, const void* data, uint32_t size);
+    Result Disconnect(SessionId session);
 
     const PeerInfo* GetPeer(SessionId session) const;
     SessionId       GetSessionByPid(ProcessId pid) const;

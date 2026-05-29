@@ -5,6 +5,7 @@
 
 #include "types.h"
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <mutex>
 #include <unordered_map>

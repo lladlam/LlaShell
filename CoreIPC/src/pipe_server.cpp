@@ -1,4 +1,5 @@
 #include "CoreIPC/pipe_channel.h"
+#include <algorithm>
 #include <Aclapi.h>
 #include <Sddl.h>
 
@@ -98,7 +99,7 @@ Result PipeChannel::StartServer(const wchar_t* pipeName, const IPCConfig* config
 
     SYSTEM_INFO si;
     GetSystemInfo(&si);
-    uint32_t threadCount = min(max(si.dwNumberOfProcessors, 2), 8);
+    uint32_t threadCount = std::min(std::max(si.dwNumberOfProcessors, static_cast<DWORD>(2)), static_cast<DWORD>(8));
 
     for (uint32_t i = 0; i < threadCount; i++) {
         HANDLE hThread = CreateThread(nullptr, 0,
