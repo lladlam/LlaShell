@@ -24,21 +24,6 @@ PipeChannel::~PipeChannel() {
     Shutdown();
 }
 
-SECURITY_ATTRIBUTES* PipeChannel::GetSecurityAttributes() {
-    if (m_securityInitialized) return &m_securityAttr;
-
-    if (!InitializeSecurityDescriptor(&m_securityDesc, SECURITY_DESCRIPTOR_REVISION))
-        return nullptr;
-    if (!SetSecurityDescriptorDacl(&m_securityDesc, TRUE, NULL, FALSE))
-        return nullptr;
-
-    m_securityAttr.nLength              = sizeof(SECURITY_ATTRIBUTES);
-    m_securityAttr.lpSecurityDescriptor = &m_securityDesc;
-    m_securityAttr.bInheritHandle       = FALSE;
-    m_securityInitialized = true;
-    return &m_securityAttr;
-}
-
 Result PipeChannel::StartServer(const wchar_t* pipeName, const IPCConfig* config) {
     if (!pipeName || !config) return Result::InvalidArg;
     if (m_running) return Result::AlreadyInit;

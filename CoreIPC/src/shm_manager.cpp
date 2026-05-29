@@ -22,19 +22,6 @@ ShmChannel::~ShmChannel() {
     m_segments.clear();
 }
 
-void ShmChannel::InitSecurity() {
-    if (m_securityInitialized) return;
-
-    if (InitializeSecurityDescriptor(&m_securityDesc, SECURITY_DESCRIPTOR_REVISION)) {
-        if (SetSecurityDescriptorDacl(&m_securityDesc, TRUE, NULL, FALSE)) {
-            m_securityAttr.nLength              = sizeof(SECURITY_ATTRIBUTES);
-            m_securityAttr.lpSecurityDescriptor = &m_securityDesc;
-            m_securityAttr.bInheritHandle       = FALSE;
-            m_securityInitialized = true;
-        }
-    }
-}
-
 ShmHeader* ShmChannel::GetHeader(void* base) {
     return static_cast<ShmHeader*>(base);
 }

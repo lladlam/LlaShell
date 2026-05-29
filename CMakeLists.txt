@@ -48,5 +48,5 @@ target_link_libraries(CoreIPC PRIVATE
 if(MSVC)
     target_link_options(CoreIPC PRIVATE /DEF:${CMAKE_CURRENT_SOURCE_DIR}/CoreIPC/coreipc.def)
 else()
-    target_link_options(CoreIPC PRIVATE -Wl,--def,${CMAKE_CURRENT_SOURCE_DIR}/CoreIPC/coreipc.def)
+    target_sources(CoreIPC PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/CoreIPC/coreipc.def)
 endif()

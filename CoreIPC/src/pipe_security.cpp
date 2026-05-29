@@ -1,4 +1,5 @@
 #include "CoreIPC/pipe_channel.h"
+#include "CoreIPC/shm_channel.h"
 #include <Aclapi.h>
 #include <Sddl.h>
 
