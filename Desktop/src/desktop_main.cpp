@@ -6,11 +6,11 @@
 #pragma comment(lib, "shell32.lib")
 
 static constexpr wchar_t kDesktopClassName[] = L"LlaShell_Desktop";
-static constexpr int kIconSize       = 48;
-static constexpr int kIconSpacingX   = 90;
-static constexpr int kIconSpacingY   = 90;
-static constexpr int kIconPadX       = 10;
-static constexpr int kIconPadY       = 10;
+static constexpr int kIconSize       = 32;
+static constexpr int kIconSpacingX   = 75;
+static constexpr int kIconSpacingY   = 75;
+static constexpr int kIconPadX       = 12;
+static constexpr int kIconPadY       = 12;
 static constexpr int kTextHeight     = 32;
 
 namespace LlaShell {

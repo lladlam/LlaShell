@@ -307,12 +307,23 @@ static void OnIPCMessage(LlaShell::IPC::SessionId /*from*/, uint16_t msgType,
     }
 }
 
-int wmain(int argc, wchar_t* argv[]) {
+static LRESULT CALLBACK HiddenWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_DESTROY) { PostQuitMessage(0); return 0; }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR lpCmdLine, int) {
+    WNDCLASSEXW wc{}; wc.cbSize = sizeof(wc); wc.lpfnWndProc = HiddenWndProc;
+    wc.hInstance = hInstance; wc.lpszClassName = L"LlaShell_MediaParser";
+    RegisterClassExW(&wc);
+    HWND hHidden = CreateWindowExW(0, wc.lpszClassName, L"MediaParser", 0,
+        0, 0, 0, 0, HWND_MESSAGE, nullptr, hInstance, nullptr);
+
     LlaShell::MediaParserService service;
     g_service = &service;
 
     int workers = 4;
-    if (argc >= 2) workers = _wtoi(argv[1]);
+    if (lpCmdLine && lpCmdLine[0]) workers = _wtoi(lpCmdLine);
     if (workers < 1) workers = 1;
     if (workers > 16) workers = 16;
 
@@ -331,32 +342,39 @@ int wmain(int argc, wchar_t* argv[]) {
 
     IPC_ShmCreate(L"Thumbnails", 0, 64, 256 * 256 * 4 + 64, &g_shmHandle);
 
-    while (g_running) {
-        LlaShell::ThumbResultInternal result;
-        if (service.TryGetResult(result)) {
-            if (g_shmHandle && result.success) {
-                std::vector<uint8_t> slotData(sizeof(uint32_t) * 4 + result.bitmap.size());
-                uint32_t* header = reinterpret_cast<uint32_t*>(slotData.data());
-                header[0] = result.requestId;
-                header[1] = result.width;
-                header[2] = result.height;
-                header[3] = static_cast<uint32_t>(result.bitmap.size());
-                if (!result.bitmap.empty())
-                    memcpy(slotData.data() + 16, result.bitmap.data(), result.bitmap.size());
-
-                IPC_ShmWrite(g_shmHandle, slotData.data(),
-                             static_cast<uint32_t>(slotData.size()), result.requestId);
+    HANDLE hThread = CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
+        while (g_running) {
+            LlaShell::ThumbResultInternal result;
+            if (g_service && g_service->TryGetResult(result)) {
+                if (g_shmHandle && result.success) {
+                    std::vector<uint8_t> slotData(sizeof(uint32_t) * 4 + result.bitmap.size());
+                    uint32_t* header = reinterpret_cast<uint32_t*>(slotData.data());
+                    header[0] = result.requestId;
+                    header[1] = result.width;
+                    header[2] = result.height;
+                    header[3] = static_cast<uint32_t>(result.bitmap.size());
+                    if (!result.bitmap.empty())
+                        memcpy(slotData.data() + 16, result.bitmap.data(), result.bitmap.size());
+                    IPC_ShmWrite(g_shmHandle, slotData.data(),
+                                 static_cast<uint32_t>(slotData.size()), result.requestId);
+                }
+            } else {
+                Sleep(10);
             }
-        } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
+        return 0;
+    }, nullptr, 0, nullptr);
+
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
     }
 
-    if (g_shmHandle) {
-        IPC_ShmClose(g_shmHandle);
-        g_shmHandle = nullptr;
-    }
+    g_running = false;
+    if (hThread) { WaitForSingleObject(hThread, 5000); CloseHandle(hThread); }
 
+    if (g_shmHandle) { IPC_ShmClose(g_shmHandle); g_shmHandle = nullptr; }
     IPC_Shutdown();
     service.Shutdown();
     g_service = nullptr;

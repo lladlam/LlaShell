@@ -1,0 +1,65 @@
+THIRD-PARTY SOFTWARE NOTICES AND INFORMATION
+=============================================
+
+LlaShell includes or depends upon the following third-party software:
+
+
+--------------------------------------------------------------------------------
+FFmpeg
+--------------------------------------------------------------------------------
+
+Website:  https://ffmpeg.org
+License:  LGPL v2.1+ or GPL v2+ (depending on build configuration)
+Source:   https://github.com/FFmpeg/FFmpeg
+
+FFmpeg is used by MediaParser.exe to generate thumbnails for video and image
+files. MediaParser.exe calls the external ffmpeg.exe CLI tool via CreateProcessW
+to extract single frames and resize images. FFmpeg is NOT statically or
+dynamically linked into any LlaShell binary.
+
+How FFmpeg is called:
+  - File:       MediaParser/src/mediaparser_main.cpp
+  - Function:   MediaParserService::TryFFmpegThumbnail()
+  - Mechanism:  CreateProcessW("ffmpeg.exe -i <input> -vframes 1 -vf scale=W:H output.bmp")
+  - Fallback:   If ffmpeg.exe is not found, MediaParser falls back to
+                SHGetFileInfoW shell icon thumbnails.
+
+License compliance notes:
+  - LlaShell does NOT modify FFmpeg source code.
+  - LlaShell does NOT link against FFmpeg libraries (static or dynamic).
+  - FFmpeg is invoked as an independent process, communicating only via
+    temporary files on disk.
+  - If you distribute ffmpeg.exe alongside LlaShell, you must comply with
+    FFmpeg's license terms. If your ffmpeg.exe build includes GPL-licensed
+    components (e.g., x264, x265), you must comply with GPL v2.
+  - If your ffmpeg.exe is a pure LGPL build, the LGPL v2.1 terms apply.
+  - Source code for FFmpeg is available at https://github.com/FFmpeg/FFmpeg
+
+Full license texts:
+  - LGPL v2.1: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
+  - GPL v2:    https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+
+
+--------------------------------------------------------------------------------
+Windows SDK / Win32 API
+--------------------------------------------------------------------------------
+
+LlaShell uses the Windows API (kernel32, user32, gdi32, shell32, comctl32,
+shlwapi, advapi32, ole32, wininet, ntdll) provided by Microsoft Windows.
+These are part of the Windows operating system and are used under Microsoft's
+standard terms of use.
+
+
+--------------------------------------------------------------------------------
+MinGW-w64 (w64devkit)
+--------------------------------------------------------------------------------
+
+Website:  https://github.com/skeeto/w64devkit
+License:  Public Domain / MIT (various components)
+
+The build toolchain used to compile LlaShell. Not distributed with LlaShell.
+
+
+================================================================================
+END OF THIRD-PARTY NOTICES
+================================================================================

@@ -175,7 +175,18 @@ static void OnIPCMessage(LlaShell::IPC::SessionId /*from*/, uint16_t msgType,
     }
 }
 
-int wmain(int /*argc*/, wchar_t* /*argv*/[]) {
+static LRESULT CALLBACK HiddenWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_DESTROY) { PostQuitMessage(0); return 0; }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
+    WNDCLASSEXW wc{}; wc.cbSize = sizeof(wc); wc.lpfnWndProc = HiddenWndProc;
+    wc.hInstance = hInstance; wc.lpszClassName = L"LlaShell_ShellHost";
+    RegisterClassExW(&wc);
+    HWND hHidden = CreateWindowExW(0, wc.lpszClassName, L"ShellHost", 0,
+        0, 0, 0, 0, HWND_MESSAGE, nullptr, hInstance, nullptr);
+
     LlaShell::ShellExtensionHost host;
     g_host = &host;
 
@@ -188,8 +199,10 @@ int wmain(int /*argc*/, wchar_t* /*argv*/[]) {
     if (LlaShell::IPC::IsSuccess(IPC_Initialize(&cfg))) {
         IPC_StartServer(L"ShellHost");
 
-        while (g_running) {
-            Sleep(100);
+        MSG msg;
+        while (GetMessageW(&msg, nullptr, 0, 0)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
         }
 
         IPC_Shutdown();

@@ -1,9 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
-project(LlaShell LANGUAGES CXX)
+project(LlaShell LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+if(NOT MSVC)
+    set(CMAKE_RC_COMPILER windres)
+endif()
 
 add_compile_definitions(
     UNICODE _UNICODE
@@ -38,6 +42,11 @@ target_include_directories(CoreIPC PUBLIC
 )
 
 target_compile_definitions(CoreIPC PRIVATE COREIPC_EXPORTS)
+
+set_target_properties(CoreIPC PROPERTIES
+    PREFIX ""
+    OUTPUT_NAME "CoreIPC"
+)
 
 target_link_libraries(CoreIPC PRIVATE
     kernel32
@@ -86,6 +95,7 @@ target_link_libraries(Taskbar PRIVATE
     shell32
     gdi32
     comctl32
+    shlwapi
 )
 if(NOT MSVC)
     target_link_options(Taskbar PRIVATE -municode)
@@ -112,7 +122,7 @@ if(NOT MSVC)
 endif()
 
 # --- ShellHost.exe ---
-add_executable(ShellHost
+add_executable(ShellHost WIN32
     ShellHost/src/shellhost_main.cpp
 )
 target_include_directories(ShellHost PRIVATE
@@ -129,7 +139,7 @@ if(NOT MSVC)
 endif()
 
 # --- MediaParser.exe ---
-add_executable(MediaParser
+add_executable(MediaParser WIN32
     MediaParser/src/mediaparser_main.cpp
 )
 target_include_directories(MediaParser PRIVATE
@@ -158,3 +168,33 @@ target_link_libraries(Updater PRIVATE
 if(NOT MSVC)
     target_link_options(Updater PRIVATE -municode)
 endif()
+
+# --- LlaShell.exe (主应用) ---
+add_executable(LlaShell WIN32
+    LlaShellApp/src/main.cpp
+    resources/LlaShell.rc
+)
+target_include_directories(LlaShell PRIVATE
+    ${SHARED_INCLUDE_DIR}
+)
+target_link_libraries(LlaShell PRIVATE
+    CoreIPC
+    shell32
+    shlwapi
+    comctl32
+    wininet
+    gdi32
+    ole32
+)
+if(NOT MSVC)
+    target_link_options(LlaShell PRIVATE -municode)
+endif()
+
+# --- Version Info RC for all exes (no icon, only version) ---
+function(add_version_resource target)
+    if(MSVC)
+        target_sources(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/resources/version_only.rc)
+    else()
+        target_sources(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/resources/version_only.rc)
+    endif()
+endfunction()
