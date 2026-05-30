@@ -22,6 +22,8 @@ extern "C" {
 COREIPC_API LlaShell::IPC::Result IPC_Initialize(const LlaShell::IPC::IPCConfig* config);
 COREIPC_API void                  IPC_Shutdown();
 
+COREIPC_API LlaShell::IPC::Result IPC_StartServer(const wchar_t* pipeName);
+
 COREIPC_API LlaShell::IPC::Result IPC_Connect(const wchar_t* targetProcessName,
                                                LlaShell::IPC::SessionId* outSession);
 COREIPC_API LlaShell::IPC::Result IPC_Disconnect(LlaShell::IPC::SessionId session);

@@ -69,6 +69,7 @@ private:
         OVERLAPPED  ov;
         IoOp        op;
         PipeInstance* instance;
+        PendingWrite* pendingWrite;  // owned; deleted on write completion
     };
 
     void   IocpWorkerThread();

@@ -1,10 +1,11 @@
 #include "CoreIPC/shm_channel.h"
 #include <intrin.h>
+#include <mutex>
 
 namespace LlaShell::IPC {
 
 static uint32_t g_crc32Table[256];
-static bool     g_crc32TableBuilt = false;
+static std::once_flag g_crc32Flag;
 
 static void BuildCRC32Table() {
     for (uint32_t i = 0; i < 256; i++) {
@@ -14,11 +15,10 @@ static void BuildCRC32Table() {
         }
         g_crc32Table[i] = crc;
     }
-    g_crc32TableBuilt = true;
 }
 
 uint32_t ShmChannel::CRC32(const void* data, uint32_t size) {
-    if (!g_crc32TableBuilt) BuildCRC32Table();
+    std::call_once(g_crc32Flag, BuildCRC32Table);
 
     const uint8_t* p = static_cast<const uint8_t*>(data);
     uint32_t crc = 0xFFFFFFFF;

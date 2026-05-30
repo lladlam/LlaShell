@@ -139,6 +139,7 @@ void PipeChannel::IocpWorkerThread() {
                 delete ovEx;
                 break;
             case IoOp::Write:
+                delete ovEx->pendingWrite;
                 delete ovEx;
                 break;
         }
@@ -356,7 +357,6 @@ Result PipeChannel::Send(SessionId to, MsgType type, const void* data, uint32_t 
     Result r = EncodeFrame(buf.data(), frameSize, type, data, size);
     if (!IsSuccess(r)) return r;
 
-    // Find the pipe instance for this session
     PipeInstance* target = nullptr;
     for (auto* inst : m_pipeInstances) {
         if (inst->sessionId == to && inst->connected) {
@@ -367,15 +367,22 @@ Result PipeChannel::Send(SessionId to, MsgType type, const void* data, uint32_t 
 
     if (!target) return Result::PeerDisconnected;
 
-    auto* writeBuf = new PendingWrite{};
-    writeBuf->buffer = std::move(buf);
-    ZeroMemory(&writeBuf->ov, sizeof(OVERLAPPED));
+    auto* pending = new PendingWrite{};
+    pending->buffer = std::move(buf);
+    ZeroMemory(&pending->ov, sizeof(OVERLAPPED));
+
+    auto* ovEx = new OverlappedEx{};
+    ZeroMemory(&ovEx->ov, sizeof(OVERLAPPED));
+    ovEx->op           = IoOp::Write;
+    ovEx->instance     = target;
+    ovEx->pendingWrite = pending;
 
     DWORD written = 0;
-    if (!WriteFile(target->hPipe, writeBuf->buffer.data(),
-                   static_cast<DWORD>(writeBuf->buffer.size()), &written, &writeBuf->ov)) {
+    if (!WriteFile(target->hPipe, pending->buffer.data(),
+                   static_cast<DWORD>(pending->buffer.size()), &written, &ovEx->ov)) {
         if (GetLastError() != ERROR_IO_PENDING) {
-            delete writeBuf;
+            delete pending;
+            delete ovEx;
             return Result::InternalError;
         }
     }
@@ -384,8 +391,15 @@ Result PipeChannel::Send(SessionId to, MsgType type, const void* data, uint32_t 
 }
 
 Result PipeChannel::Broadcast(MsgType type, const void* data, uint32_t size) {
-    std::lock_guard<std::mutex> lock(m_peersMutex);
-    for (const auto& [id, peer] : m_peers) {
+    std::vector<SessionId> sessionIds;
+    {
+        std::lock_guard<std::mutex> lock(m_peersMutex);
+        sessionIds.reserve(m_peers.size());
+        for (const auto& [id, peer] : m_peers) {
+            sessionIds.push_back(id);
+        }
+    }
+    for (SessionId id : sessionIds) {
         Send(id, type, data, size);
     }
     return Result::Success;

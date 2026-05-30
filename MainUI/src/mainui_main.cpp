@@ -37,6 +37,12 @@ MainWindow::MainWindow()
     , m_panelBrush(nullptr)
     , m_folderIcon(nullptr)
     , m_fileIcon(nullptr)
+    , m_taskbarSession(IPC::kInvalidSession)
+    , m_desktopSession(IPC::kInvalidSession)
+    , m_shellHostSession(IPC::kInvalidSession)
+    , m_mediaParserSession(IPC::kInvalidSession)
+    , m_ipcReady(false)
+    , m_nextThumbnailRequestId(1)
 {
 }
 
@@ -96,6 +102,10 @@ bool MainWindow::Create(HINSTANCE hInstance, const wchar_t* initialPath) {
     if (!m_hwnd) return false;
 
     SetWindowLongPtrW(m_hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+    RegisterTouchWindow(m_hwnd, 0);
+    ChangeWindowMessageFilterEx(m_hwnd, WM_DROPFILES, MSGFLT_ALLOW, nullptr);
+    ChangeWindowMessageFilterEx(m_hwnd, WM_COPYDATA, MSGFLT_ALLOW, nullptr);
+    ChangeWindowMessageFilterEx(m_hwnd, 0x0049, MSGFLT_ALLOW, nullptr); // WM_COPYGLOBALDATA
 
     CreateControls();
 
@@ -105,6 +115,9 @@ bool MainWindow::Create(HINSTANCE hInstance, const wchar_t* initialPath) {
 
     m_running = true;
     m_scanThread = std::thread(&MainWindow::ScanWorkerThread, this);
+
+    InitIPC();
+    NotifyTaskbarWindowCreated();
 
     return true;
 }
@@ -117,6 +130,9 @@ void MainWindow::Show(int nCmdShow) {
 }
 
 void MainWindow::Shutdown() {
+    NotifyTaskbarWindowDestroyed();
+    ShutdownIPC();
+
     m_running = false;
 
     if (m_scanThread.joinable()) {
@@ -394,6 +410,7 @@ void MainWindow::OnScanComplete(int tabIndex) {
         static_cast<int>(tab.entries.size()));
     SendMessageW(m_statusBar, SB_SETTEXTW, 0, (LPARAM)status);
     InvalidateRect(m_hwnd, nullptr, TRUE);
+    RequestThumbnailsForTab(tabIndex);
 }
 
 void MainWindow::HandleResize() {
@@ -433,6 +450,248 @@ void MainWindow::GoUp() {
     if (parent[0]) NavigateTo(parent);
 }
 
+void MainWindow::InitIPC() {
+    IPC::IPCConfig cfg = IPC::DefaultConfig();
+    cfg.processName  = L"MainUI";
+    cfg.onMessage    = OnIPCMessage;
+    cfg.onConnected  = OnPeerConnected;
+    cfg.onDisconnected = OnPeerDisconnected;
+    cfg.userData     = this;
+
+    if (!IsSuccess(IPC_Initialize(&cfg))) return;
+
+    if (!IsSuccess(IPC_StartServer(L"MainUI"))) {
+        IPC_Shutdown();
+        return;
+    }
+
+    m_ipcReady.store(true, std::memory_order_relaxed);
+
+    IPC::SessionId sid = IPC::kInvalidSession;
+    if (IsSuccess(IPC_Connect(L"Desktop", &sid))) m_desktopSession = sid;
+    sid = IPC::kInvalidSession;
+    if (IsSuccess(IPC_Connect(L"Taskbar", &sid))) m_taskbarSession = sid;
+    sid = IPC::kInvalidSession;
+    if (IsSuccess(IPC_Connect(L"ShellHost", &sid))) m_shellHostSession = sid;
+    sid = IPC::kInvalidSession;
+    if (IsSuccess(IPC_Connect(L"MediaParser", &sid))) m_mediaParserSession = sid;
+}
+
+void MainWindow::ShutdownIPC() {
+    if (m_ipcReady.load(std::memory_order_relaxed)) {
+        IPC_Shutdown();
+        m_ipcReady.store(false, std::memory_order_relaxed);
+        m_taskbarSession = IPC::kInvalidSession;
+        m_desktopSession = IPC::kInvalidSession;
+        m_shellHostSession = IPC::kInvalidSession;
+        m_mediaParserSession = IPC::kInvalidSession;
+    }
+}
+
+void MainWindow::NotifyTaskbarWindowCreated() {
+    if (!m_ipcReady.load(std::memory_order_relaxed)) return;
+    if (m_taskbarSession == IPC::kInvalidSession) return;
+
+    IPCMessageHeader hdr{};
+    hdr.sourcePid = GetCurrentProcessId();
+    hdr.type = IPCMessageType::MainUIWindowCreated;
+
+    WindowNotification wn{};
+    wn.windowPid = GetCurrentProcessId();
+    wn.hwnd = reinterpret_cast<uint64_t>(m_hwnd);
+    GetWindowTextW(m_hwnd, wn.title, _countof(wn.title));
+
+    hdr.dataSize = sizeof(wn);
+    std::vector<uint8_t> payload(sizeof(hdr) + sizeof(wn));
+    memcpy(payload.data(), &hdr, sizeof(hdr));
+    memcpy(payload.data() + sizeof(hdr), &wn, sizeof(wn));
+    IPC_Send(m_taskbarSession, IPC::MsgType::Application,
+             payload.data(), static_cast<uint32_t>(payload.size()));
+}
+
+void MainWindow::NotifyTaskbarWindowDestroyed() {
+    if (!m_ipcReady.load(std::memory_order_relaxed)) return;
+    if (m_taskbarSession == IPC::kInvalidSession) return;
+
+    IPCMessageHeader hdr{};
+    hdr.sourcePid = GetCurrentProcessId();
+    hdr.type = IPCMessageType::MainUIWindowDestroyed;
+
+    WindowNotification wn{};
+    wn.windowPid = GetCurrentProcessId();
+    wn.hwnd = reinterpret_cast<uint64_t>(m_hwnd);
+
+    hdr.dataSize = sizeof(wn);
+    std::vector<uint8_t> payload(sizeof(hdr) + sizeof(wn));
+    memcpy(payload.data(), &hdr, sizeof(hdr));
+    memcpy(payload.data() + sizeof(hdr), &wn, sizeof(wn));
+    IPC_Send(m_taskbarSession, IPC::MsgType::Application,
+             payload.data(), static_cast<uint32_t>(payload.size()));
+}
+
+void MainWindow::NotifyTaskbarTabChanged() {
+    if (!m_ipcReady.load(std::memory_order_relaxed)) return;
+    if (m_taskbarSession == IPC::kInvalidSession) return;
+
+    IPCMessageHeader hdr{};
+    hdr.sourcePid = GetCurrentProcessId();
+    hdr.type = IPCMessageType::MainUITabChanged;
+
+    WindowNotification wn{};
+    wn.windowPid = GetCurrentProcessId();
+    wn.hwnd = reinterpret_cast<uint64_t>(m_hwnd);
+    {
+        std::lock_guard<std::mutex> lock(m_tabMutex);
+        if (m_activeTab >= 0 && m_activeTab < static_cast<int>(m_tabs.size()))
+            wcsncpy_s(wn.title, m_tabs[m_activeTab].title.c_str(), _countof(wn.title) - 1);
+    }
+
+    hdr.dataSize = sizeof(wn);
+    std::vector<uint8_t> payload(sizeof(hdr) + sizeof(wn));
+    memcpy(payload.data(), &hdr, sizeof(hdr));
+    memcpy(payload.data() + sizeof(hdr), &wn, sizeof(wn));
+    IPC_Send(m_taskbarSession, IPC::MsgType::Application,
+             payload.data(), static_cast<uint32_t>(payload.size()));
+}
+
+void MainWindow::OnIPCMessage(IPC::SessionId /*from*/, uint16_t msgType,
+                              const void* data, uint32_t size, void* userData) {
+    auto* self = static_cast<MainWindow*>(userData);
+    if (msgType != static_cast<uint16_t>(IPC::MsgType::Application)) return;
+    if (!data || size < sizeof(IPCMessageHeader)) return;
+
+    const auto* hdr = static_cast<const IPCMessageHeader*>(data);
+    const void* payload = static_cast<const uint8_t*>(data) + sizeof(IPCMessageHeader);
+    uint32_t payloadSize = size - sizeof(IPCMessageHeader);
+
+    switch (hdr->type) {
+    case IPCMessageType::DesktopFolderDoubleClick:
+        if (payloadSize >= sizeof(FolderOpenRequest)) {
+            const auto* req = static_cast<const FolderOpenRequest*>(payload);
+            if (req->path[0]) {
+                self->AddTab(req->path);
+                self->NavigateTo(req->path);
+            }
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+void MainWindow::OnPeerConnected(IPC::SessionId peer, IPC::ProcessId pid, void* userData) {
+    auto* self = static_cast<MainWindow*>(userData);
+    if (pid == 0) return;
+    wchar_t exePath[MAX_PATH] = {};
+    DWORD pathLen = MAX_PATH;
+    HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (hProc) {
+        if (QueryFullProcessImageNameW(hProc, 0, exePath, &pathLen)) {
+            const wchar_t* name = wcsrchr(exePath, L'\\');
+            if (name) {
+                name++;
+                if (_wcsicmp(name, L"Taskbar.exe") == 0) self->m_taskbarSession = peer;
+                else if (_wcsicmp(name, L"Desktop.exe") == 0) self->m_desktopSession = peer;
+                else if (_wcsicmp(name, L"ShellHost.exe") == 0) self->m_shellHostSession = peer;
+                else if (_wcsicmp(name, L"MediaParser.exe") == 0) self->m_mediaParserSession = peer;
+            }
+        }
+        CloseHandle(hProc);
+    }
+}
+
+void MainWindow::OnPeerDisconnected(IPC::SessionId peer, void* userData) {
+    auto* self = static_cast<MainWindow*>(userData);
+    if (peer == self->m_taskbarSession) self->m_taskbarSession = IPC::kInvalidSession;
+    else if (peer == self->m_desktopSession) self->m_desktopSession = IPC::kInvalidSession;
+    else if (peer == self->m_shellHostSession) self->m_shellHostSession = IPC::kInvalidSession;
+    else if (peer == self->m_mediaParserSession) self->m_mediaParserSession = IPC::kInvalidSession;
+}
+
+void MainWindow::RequestContextMenu(HWND parentHwnd, int screenX, int screenY, const wchar_t* filePath) {
+    if (!m_ipcReady.load(std::memory_order_relaxed)) return;
+    if (m_shellHostSession == IPC::kInvalidSession) return;
+
+    IPCMessageHeader hdr{};
+    hdr.sourcePid = GetCurrentProcessId();
+    hdr.type = IPCMessageType::RequestContextMenu;
+
+    ContextMenuRequest req{};
+    req.hwndParent = reinterpret_cast<uint64_t>(parentHwnd);
+    req.screenX = screenX;
+    req.screenY = screenY;
+    wcsncpy_s(req.filePath, filePath, _countof(req.filePath) - 1);
+
+    hdr.dataSize = sizeof(req);
+    std::vector<uint8_t> payload(sizeof(hdr) + sizeof(req));
+    memcpy(payload.data(), &hdr, sizeof(hdr));
+    memcpy(payload.data() + sizeof(hdr), &req, sizeof(req));
+    IPC_Send(m_shellHostSession, IPC::MsgType::Application,
+             payload.data(), static_cast<uint32_t>(payload.size()));
+}
+
+void MainWindow::RequestThumbnailsForTab(int tabIndex) {
+    if (!m_ipcReady.load(std::memory_order_relaxed)) return;
+    if (m_mediaParserSession == IPC::kInvalidSession) return;
+
+    std::lock_guard<std::mutex> lock(m_tabMutex);
+    if (tabIndex < 0 || tabIndex >= static_cast<int>(m_tabs.size())) return;
+
+    for (const auto& entry : m_tabs[tabIndex].entries) {
+        if (entry.isDirectory) continue;
+
+        wchar_t ext[MAX_PATH];
+        wcsncpy_s(ext, entry.fullPath.c_str(), _countof(ext) - 1);
+        wchar_t* dot = wcsrchr(ext, L'.');
+        if (!dot) continue;
+
+        bool isMedia = (_wcsicmp(dot, L".jpg") == 0 || _wcsicmp(dot, L".jpeg") == 0 ||
+                        _wcsicmp(dot, L".png") == 0 || _wcsicmp(dot, L".bmp") == 0 ||
+                        _wcsicmp(dot, L".gif") == 0 || _wcsicmp(dot, L".mp4") == 0 ||
+                        _wcsicmp(dot, L".avi") == 0 || _wcsicmp(dot, L".mkv") == 0);
+        if (!isMedia) continue;
+
+        uint32_t reqId = m_nextThumbnailRequestId.fetch_add(1, std::memory_order_relaxed);
+
+        IPCMessageHeader hdr{};
+        hdr.sourcePid = GetCurrentProcessId();
+        hdr.type = IPCMessageType::RequestThumbnail;
+
+        ThumbnailRequest tr{};
+        tr.requestId = reqId;
+        wcsncpy_s(tr.filePath, entry.fullPath.c_str(), _countof(tr.filePath) - 1);
+        tr.maxWidth = 64;
+        tr.maxHeight = 64;
+
+        hdr.dataSize = sizeof(tr);
+        std::vector<uint8_t> payload(sizeof(hdr) + sizeof(tr));
+        memcpy(payload.data(), &hdr, sizeof(hdr));
+        memcpy(payload.data() + sizeof(hdr), &tr, sizeof(tr));
+        IPC_Send(m_mediaParserSession, IPC::MsgType::Application,
+                 payload.data(), static_cast<uint32_t>(payload.size()));
+    }
+}
+
+void MainWindow::HandleDoubleClick(int index) {
+    std::wstring targetPath;
+    bool isDir = false;
+    {
+        std::lock_guard<std::mutex> lock(m_tabMutex);
+        if (m_activeTab < 0 || m_activeTab >= static_cast<int>(m_tabs.size())) return;
+        if (index < 0 || index >= static_cast<int>(m_tabs[m_activeTab].entries.size())) return;
+
+        const auto& entry = m_tabs[m_activeTab].entries[index];
+        targetPath = entry.fullPath;
+        isDir = entry.isDirectory;
+    }
+
+    if (isDir) {
+        NavigateTo(targetPath.c_str());
+    } else {
+        ShellExecuteW(m_hwnd, nullptr, targetPath.c_str(), nullptr, nullptr, SW_SHOW);
+    }
+}
+
 void MainWindow::CloseTab(int index) {
     std::lock_guard<std::mutex> lock(m_tabMutex);
     if (index < 0 || index >= static_cast<int>(m_tabs.size())) return;
@@ -455,12 +714,16 @@ void MainWindow::CloseTab(int index) {
 }
 
 void MainWindow::SwitchTab(int index) {
-    std::lock_guard<std::mutex> lock(m_tabMutex);
-    if (index < 0 || index >= static_cast<int>(m_tabs.size())) return;
-    m_activeTab = index;
-    SendMessageW(m_tabControl, TCM_SETCURSEL, index, 0);
+    {
+        std::lock_guard<std::mutex> lock(m_tabMutex);
+        if (index < 0 || index >= static_cast<int>(m_tabs.size())) return;
+        m_activeTab = index;
+        SendMessageW(m_tabControl, TCM_SETCURSEL, index, 0);
+    }
     InvalidateRect(m_hwnd, nullptr, TRUE);
+    NotifyTaskbarTabChanged();
 }
+
 
 LRESULT CALLBACK MainWindow::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     MainWindow* self = reinterpret_cast<MainWindow*>(
@@ -579,6 +842,37 @@ LRESULT CALLBACK MainWindow::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
     }
     case WM_USER + 1:
         if (self) self->OnScanComplete((int)wParam);
+        return 0;
+    case WM_RBUTTONUP:
+        if (self) {
+            int x = LOWORD(lParam);
+            int y = HIWORD(lParam);
+            POINT pt = { x, y };
+            ClientToScreen(hWnd, &pt);
+
+            int toolbarH = kToolbarHeight + kTabHeight;
+            if (y >= toolbarH) {
+                std::lock_guard<std::mutex> lock(self->m_tabMutex);
+                int rowH = 22;
+                int itemIndex = (y - toolbarH - 4) / rowH;
+                if (self->m_activeTab >= 0 && itemIndex >= 0 &&
+                    itemIndex < static_cast<int>(self->m_tabs[self->m_activeTab].entries.size())) {
+                    const auto& entry = self->m_tabs[self->m_activeTab].entries[itemIndex];
+                    self->RequestContextMenu(hWnd, pt.x, pt.y, entry.fullPath.c_str());
+                }
+            }
+        }
+        return 0;
+    case WM_LBUTTONDBLCLK:
+        if (self) {
+            int yPos = HIWORD(lParam);
+            int toolbarH = kToolbarHeight + kTabHeight;
+            if (yPos >= toolbarH) {
+                int rowH = 22;
+                int itemIndex = (yPos - toolbarH - 4) / rowH;
+                self->HandleDoubleClick(itemIndex);
+            }
+        }
         return 0;
     case WM_DESTROY:
         PostQuitMessage(0);

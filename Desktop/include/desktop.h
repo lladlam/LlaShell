@@ -17,6 +17,9 @@
 #include <thread>
 #include <atomic>
 
+#include "CoreIPC/CoreIPC.h"
+#include "ipc_messages.h"
+
 namespace LlaShell {
 
 struct DesktopIcon {
@@ -48,6 +51,11 @@ private:
     void InitIPC();
     void ShutdownIPC();
 
+    static void OnIPCMessage(IPC::SessionId from, uint16_t msgType,
+                             const void* data, uint32_t size, void* userData);
+    static void OnPeerConnected(IPC::SessionId peer, IPC::ProcessId pid, void* userData);
+    static void OnPeerDisconnected(IPC::SessionId peer, void* userData);
+
     HWND                    m_hwnd;
     HINSTANCE               m_hInstance;
     std::vector<DesktopIcon>m_icons;
@@ -59,6 +67,9 @@ private:
     int                     m_iconSpacingY;
     HFONT                   m_font;
     HBRUSH                  m_bgBrush;
+
+    IPC::SessionId          m_mainUISession;
+    std::atomic<bool>       m_ipcReady;
 };
 
 } // namespace LlaShell

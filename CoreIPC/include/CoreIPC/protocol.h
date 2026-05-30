@@ -30,6 +30,8 @@ enum class MsgType : uint16_t {
     ProcessReady    = 0x0300,
     ProcessShutdown = 0x0301,
     ProcessCrashed  = 0x0302,
+
+    Application     = 0x0400,
 };
 
 #pragma pack(push, 1)

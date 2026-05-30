@@ -15,7 +15,8 @@ if(MSVC)
     add_compile_options(/W4 /utf-8)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 else()
-    add_compile_options(-Wall -Wextra -Wpedantic -finput-charset=UTF-8)
+    add_compile_options(-Wall -Wextra -Wpedantic -finput-charset=UTF-8 -Wno-unknown-pragmas -Wno-unused-parameter)
+    add_link_options(-Wl,--allow-multiple-definition)
 endif()
 
 # --- CoreIPC DLL ---
@@ -138,8 +139,22 @@ target_link_libraries(MediaParser PRIVATE
     CoreIPC
     gdi32
     shell32
+    shlwapi
     comctl32
 )
 if(NOT MSVC)
     target_link_options(MediaParser PRIVATE -municode)
+endif()
+
+# --- Updater.exe ---
+add_executable(Updater WIN32
+    Updater/src/updater_main.cpp
+)
+target_link_libraries(Updater PRIVATE
+    shell32
+    shlwapi
+    wininet
+)
+if(NOT MSVC)
+    target_link_options(Updater PRIVATE -municode)
 endif()

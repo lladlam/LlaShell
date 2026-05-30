@@ -18,6 +18,9 @@
 #include <atomic>
 #include <functional>
 
+#include "CoreIPC/CoreIPC.h"
+#include "ipc_messages.h"
+
 namespace LlaShell {
 
 struct TrayIcon {
@@ -69,6 +72,18 @@ private:
     void UpdateClock();
     void ShowStartMenu(int x, int y);
 
+    void InitIPC();
+    void ShutdownIPC();
+
+    static void OnIPCMessage(IPC::SessionId from, uint16_t msgType,
+                             const void* data, uint32_t size, void* userData);
+    static void OnPeerConnected(IPC::SessionId peer, IPC::ProcessId pid, void* userData);
+    static void OnPeerDisconnected(IPC::SessionId peer, void* userData);
+
+    void AddTaskButton(uint32_t pid, uint64_t hwnd, const wchar_t* title);
+    void RemoveTaskButton(uint64_t hwnd);
+    void UpdateTaskButtonTitle(uint64_t hwnd, const wchar_t* title);
+
     HWND                    m_hwnd;
     HINSTANCE               m_hInstance;
     std::vector<TaskButton> m_buttons;
@@ -89,6 +104,8 @@ private:
 
     wchar_t                 m_clockText[32];
     std::mutex              m_clockMutex;
+
+    std::atomic<bool>       m_ipcReady;
 };
 
 } // namespace LlaShell

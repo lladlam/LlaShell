@@ -20,6 +20,9 @@
 #include <functional>
 #include <queue>
 
+#include "CoreIPC/CoreIPC.h"
+#include "ipc_messages.h"
+
 #pragma comment(lib, "comctl32.lib")
 
 namespace LlaShell {
@@ -92,6 +95,19 @@ private:
     void GoForward();
     void GoUp();
 
+    void InitIPC();
+    void ShutdownIPC();
+    void NotifyTaskbarWindowCreated();
+    void NotifyTaskbarWindowDestroyed();
+    void NotifyTaskbarTabChanged();
+    void RequestContextMenu(HWND parentHwnd, int screenX, int screenY, const wchar_t* filePath);
+    void RequestThumbnailsForTab(int tabIndex);
+
+    static void OnIPCMessage(IPC::SessionId from, uint16_t msgType,
+                             const void* data, uint32_t size, void* userData);
+    static void OnPeerConnected(IPC::SessionId peer, IPC::ProcessId pid, void* userData);
+    static void OnPeerDisconnected(IPC::SessionId peer, void* userData);
+
     HWND                    m_hwnd;
     HWND                    m_toolbar;
     HWND                    m_statusBar;
@@ -116,6 +132,13 @@ private:
     HBRUSH                  m_panelBrush;
     HICON                   m_folderIcon;
     HICON                   m_fileIcon;
+
+    IPC::SessionId          m_taskbarSession;
+    IPC::SessionId          m_desktopSession;
+    IPC::SessionId          m_shellHostSession;
+    IPC::SessionId          m_mediaParserSession;
+    std::atomic<bool>       m_ipcReady;
+    std::atomic<uint32_t>   m_nextThumbnailRequestId;
 };
 
 } // namespace LlaShell

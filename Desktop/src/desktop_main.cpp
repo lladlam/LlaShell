@@ -24,6 +24,8 @@ DesktopWindow::DesktopWindow()
     , m_iconSpacingY(kIconSpacingY)
     , m_font(nullptr)
     , m_bgBrush(nullptr)
+    , m_mainUISession(IPC::kInvalidSession)
+    , m_ipcReady(false)
 {
 }
 
@@ -65,10 +67,13 @@ bool DesktopWindow::Create(HINSTANCE hInstance) {
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
 
+    RegisterTouchWindow(m_hwnd, 0);
+
     m_running = true;
     m_worker = std::thread(&DesktopWindow::WorkerThread, this);
 
     ScanDesktopFolder();
+    InitIPC();
 
     SetWindowPos(m_hwnd, HWND_BOTTOM, 0, 0, 0, 0,
         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -84,6 +89,8 @@ void DesktopWindow::Show() {
 }
 
 void DesktopWindow::Shutdown() {
+    ShutdownIPC();
+
     m_running = false;
 
     if (m_worker.joinable()) {
@@ -200,8 +207,23 @@ void DesktopWindow::HandleDoubleClick(int x, int y) {
         if (x >= ix && x < ix + kIconSpacingX &&
             y >= iy && y < iy + kIconSpacingY) {
             if (icon.isDirectory) {
-                ShellExecuteW(m_hwnd, L"open", icon.fullPath.c_str(),
-                    nullptr, nullptr, SW_SHOW);
+                if (m_ipcReady.load(std::memory_order_relaxed) &&
+                    m_mainUISession != IPC::kInvalidSession) {
+                    IPCMessageHeader hdr{};
+                    hdr.sourcePid = GetCurrentProcessId();
+                    hdr.type = IPCMessageType::DesktopFolderDoubleClick;
+                    FolderOpenRequest req{};
+                    wcsncpy_s(req.path, icon.fullPath.c_str(), _countof(req.path) - 1);
+                    hdr.dataSize = sizeof(req);
+                    std::vector<uint8_t> payload(sizeof(hdr) + sizeof(req));
+                    memcpy(payload.data(), &hdr, sizeof(hdr));
+                    memcpy(payload.data() + sizeof(hdr), &req, sizeof(req));
+                    IPC_Send(m_mainUISession, IPC::MsgType::Application,
+                             payload.data(), static_cast<uint32_t>(payload.size()));
+                } else {
+                    ShellExecuteW(m_hwnd, L"open", icon.fullPath.c_str(),
+                        nullptr, nullptr, SW_SHOW);
+                }
             } else {
                 ShellExecuteW(m_hwnd, nullptr, icon.fullPath.c_str(),
                     nullptr, nullptr, SW_SHOW);
@@ -255,6 +277,54 @@ void DesktopWindow::WorkerThread() {
     }
 }
 
+void DesktopWindow::InitIPC() {
+    IPC::IPCConfig cfg = IPC::DefaultConfig();
+    cfg.processName  = L"Desktop";
+    cfg.onMessage    = OnIPCMessage;
+    cfg.onConnected  = OnPeerConnected;
+    cfg.onDisconnected = OnPeerDisconnected;
+    cfg.userData     = this;
+
+    if (!IsSuccess(IPC_Initialize(&cfg))) return;
+
+    if (!IsSuccess(IPC_StartServer(L"Desktop"))) {
+        IPC_Shutdown();
+        return;
+    }
+
+    m_ipcReady.store(true, std::memory_order_relaxed);
+
+    IPC::SessionId session = IPC::kInvalidSession;
+    if (IsSuccess(IPC_Connect(L"MainUI", &session))) {
+        m_mainUISession = session;
+    }
+}
+
+void DesktopWindow::ShutdownIPC() {
+    if (m_ipcReady.load(std::memory_order_relaxed)) {
+        IPC_Shutdown();
+        m_ipcReady.store(false, std::memory_order_relaxed);
+        m_mainUISession = IPC::kInvalidSession;
+    }
+}
+
+void DesktopWindow::OnIPCMessage(IPC::SessionId /*from*/, uint16_t /*msgType*/,
+                                 const void* /*data*/, uint32_t /*size*/, void* /*userData*/) {
+}
+
+void DesktopWindow::OnPeerConnected(IPC::SessionId peer, IPC::ProcessId /*pid*/, void* userData) {
+    auto* self = static_cast<DesktopWindow*>(userData);
+    if (!self->m_ipcReady.load(std::memory_order_relaxed)) return;
+    self->m_mainUISession = peer;
+}
+
+void DesktopWindow::OnPeerDisconnected(IPC::SessionId peer, void* userData) {
+    auto* self = static_cast<DesktopWindow*>(userData);
+    if (peer == self->m_mainUISession) {
+        self->m_mainUISession = IPC::kInvalidSession;
+    }
+}
+
 LRESULT CALLBACK DesktopWindow::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     DesktopWindow* self = reinterpret_cast<DesktopWindow*>(
         GetWindowLongPtrW(hWnd, GWLP_USERDATA));
@@ -282,6 +352,25 @@ LRESULT CALLBACK DesktopWindow::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
             self->ScanDesktopFolder();
         }
         return 0;
+    case WM_TOUCH:
+        if (self && LOWORD(wParam) > 0) {
+            HTOUCHINPUT hTouch = reinterpret_cast<HTOUCHINPUT>(lParam);
+            TOUCHINPUT ti{};
+            if (GetTouchInputInfo(hTouch, 1, &ti, sizeof(TOUCHINPUT))) {
+                POINT pt = { TOUCH_COORD_TO_PIXEL(ti.x), TOUCH_COORD_TO_PIXEL(ti.y) };
+                ScreenToClient(self->m_hwnd, &pt);
+                if (ti.dwFlags & TOUCHEVENTF_PRIMARY) {
+                    if (ti.dwFlags & TOUCHEVENTF_DOWN) {
+                        // long-press detection could be added here
+                    } else if (ti.dwFlags & TOUCHEVENTF_UP) {
+                        self->HandleDoubleClick(pt.x, pt.y);
+                    }
+                }
+                CloseTouchInputHandle(hTouch);
+            }
+            return 0;
+        }
+        return DefWindowProcW(hWnd, msg, wParam, lParam);
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;

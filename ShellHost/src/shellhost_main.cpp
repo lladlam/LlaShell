@@ -6,6 +6,10 @@
 #include <vector>
 #include <string>
 #include <mutex>
+#include <atomic>
+
+#include "CoreIPC/CoreIPC.h"
+#include "ipc_messages.h"
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -151,20 +155,44 @@ private:
 } // namespace LlaShell
 
 static LlaShell::ShellExtensionHost* g_host = nullptr;
+static std::atomic<bool> g_running(true);
 
-int wmain(int argc, wchar_t* argv[]) {
+static void OnIPCMessage(LlaShell::IPC::SessionId /*from*/, uint16_t msgType,
+                         const void* data, uint32_t size, void* /*userData*/) {
+    if (msgType != static_cast<uint16_t>(LlaShell::IPC::MsgType::Application)) return;
+    if (!data || size < sizeof(LlaShell::IPCMessageHeader)) return;
+
+    const auto* hdr = static_cast<const LlaShell::IPCMessageHeader*>(data);
+    const void* payload = static_cast<const uint8_t*>(data) + sizeof(LlaShell::IPCMessageHeader);
+    uint32_t payloadSize = size - sizeof(LlaShell::IPCMessageHeader);
+
+    if (hdr->type == LlaShell::IPCMessageType::RequestContextMenu) {
+        if (payloadSize >= sizeof(LlaShell::ContextMenuRequest) && g_host) {
+            const auto* req = static_cast<const LlaShell::ContextMenuRequest*>(payload);
+            HWND parentHwnd = reinterpret_cast<HWND>(req->hwndParent);
+            g_host->ShowContextMenu(parentHwnd, req->filePath, req->screenX, req->screenY);
+        }
+    }
+}
+
+int wmain(int /*argc*/, wchar_t* /*argv*/[]) {
     LlaShell::ShellExtensionHost host;
     g_host = &host;
 
     if (!host.Initialize()) return 1;
 
-    if (argc >= 4) {
-        wchar_t* filePath = argv[1];
-        int x = _wtoi(argv[2]);
-        int y = _wtoi(argv[3]);
-        HWND parentHwnd = (argc >= 5) ? reinterpret_cast<HWND>(_wcstoui64(argv[4], nullptr, 10)) : nullptr;
+    LlaShell::IPC::IPCConfig cfg = LlaShell::IPC::DefaultConfig();
+    cfg.processName = L"ShellHost";
+    cfg.onMessage   = OnIPCMessage;
 
-        host.ShowContextMenu(parentHwnd, filePath, x, y);
+    if (LlaShell::IPC::IsSuccess(IPC_Initialize(&cfg))) {
+        IPC_StartServer(L"ShellHost");
+
+        while (g_running) {
+            Sleep(100);
+        }
+
+        IPC_Shutdown();
     }
 
     g_host = nullptr;

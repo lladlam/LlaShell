@@ -3,6 +3,7 @@ LIBRARY CoreIPC
 EXPORTS
     IPC_Initialize
     IPC_Shutdown
+    IPC_StartServer
     IPC_Connect
     IPC_Disconnect
     IPC_Send

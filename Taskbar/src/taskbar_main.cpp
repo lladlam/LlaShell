@@ -22,6 +22,7 @@ TaskbarWindow::TaskbarWindow()
     , m_btnBrush(nullptr)
     , m_activeBrush(nullptr)
     , m_borderPen(nullptr)
+    , m_ipcReady(false)
 {
     m_clockText[0] = L'\0';
 }
@@ -83,6 +84,8 @@ bool TaskbarWindow::Create(HINSTANCE hInstance) {
     StringCchCopyW(nid.szTip, _countof(nid.szTip), L"LlaShell");
     Shell_NotifyIconW(NIM_ADD, &nid);
 
+    InitIPC();
+
     return true;
 }
 
@@ -95,6 +98,8 @@ void TaskbarWindow::Show() {
 }
 
 void TaskbarWindow::Shutdown() {
+    ShutdownIPC();
+
     m_running = false;
 
     NOTIFYICONDATAW nid{};
@@ -304,11 +309,130 @@ void TaskbarWindow::FullscreenDetectThread() {
         if (isFullscreen && !m_isHidden) {
             m_isHidden = true;
             PostMessage(m_hwnd, WM_FULLSCREEN_CHECK, 1, 0);
+            if (m_ipcReady.load(std::memory_order_relaxed)) {
+                IPCMessageHeader hdr{};
+                hdr.sourcePid = GetCurrentProcessId();
+                hdr.type = IPCMessageType::FullscreenDetected;
+                hdr.dataSize = 0;
+                IPC_Broadcast(IPC::MsgType::Application, &hdr, sizeof(hdr));
+            }
         } else if (!isFullscreen && m_isHidden) {
             m_isHidden = false;
             PostMessage(m_hwnd, WM_FULLSCREEN_CHECK, 0, 0);
+            if (m_ipcReady.load(std::memory_order_relaxed)) {
+                IPCMessageHeader hdr{};
+                hdr.sourcePid = GetCurrentProcessId();
+                hdr.type = IPCMessageType::FullscreenExited;
+                hdr.dataSize = 0;
+                IPC_Broadcast(IPC::MsgType::Application, &hdr, sizeof(hdr));
+            }
         }
     }
+}
+
+void TaskbarWindow::InitIPC() {
+    IPC::IPCConfig cfg = IPC::DefaultConfig();
+    cfg.processName  = L"Taskbar";
+    cfg.onMessage    = OnIPCMessage;
+    cfg.onConnected  = OnPeerConnected;
+    cfg.onDisconnected = OnPeerDisconnected;
+    cfg.userData     = this;
+
+    if (!IsSuccess(IPC_Initialize(&cfg))) return;
+
+    if (!IsSuccess(IPC_StartServer(L"Taskbar"))) {
+        IPC_Shutdown();
+        return;
+    }
+
+    m_ipcReady.store(true, std::memory_order_relaxed);
+
+    IPC::SessionId sid = IPC::kInvalidSession;
+    IPC_Connect(L"Desktop", &sid);
+    IPC_Connect(L"MainUI", &sid);
+}
+
+void TaskbarWindow::ShutdownIPC() {
+    if (m_ipcReady.load(std::memory_order_relaxed)) {
+        IPC_Shutdown();
+        m_ipcReady.store(false, std::memory_order_relaxed);
+    }
+}
+
+void TaskbarWindow::OnIPCMessage(IPC::SessionId /*from*/, uint16_t msgType,
+                                 const void* data, uint32_t size, void* userData) {
+    auto* self = static_cast<TaskbarWindow*>(userData);
+    if (msgType != static_cast<uint16_t>(IPC::MsgType::Application)) return;
+    if (!data || size < sizeof(IPCMessageHeader)) return;
+
+    const auto* hdr = static_cast<const IPCMessageHeader*>(data);
+    const void* payload = static_cast<const uint8_t*>(data) + sizeof(IPCMessageHeader);
+    uint32_t payloadSize = size - sizeof(IPCMessageHeader);
+
+    switch (hdr->type) {
+    case IPCMessageType::MainUIWindowCreated:
+        if (payloadSize >= sizeof(WindowNotification)) {
+            const auto* wn = static_cast<const WindowNotification*>(payload);
+            self->AddTaskButton(wn->windowPid, wn->hwnd, wn->title);
+        }
+        break;
+    case IPCMessageType::MainUIWindowDestroyed:
+        if (payloadSize >= sizeof(WindowNotification)) {
+            const auto* wn = static_cast<const WindowNotification*>(payload);
+            self->RemoveTaskButton(wn->hwnd);
+        }
+        break;
+    case IPCMessageType::MainUITabChanged:
+        if (payloadSize >= sizeof(WindowNotification)) {
+            const auto* wn = static_cast<const WindowNotification*>(payload);
+            self->UpdateTaskButtonTitle(wn->hwnd, wn->title);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+void TaskbarWindow::OnPeerConnected(IPC::SessionId /*peer*/, IPC::ProcessId /*pid*/, void* /*userData*/) {
+}
+
+void TaskbarWindow::OnPeerDisconnected(IPC::SessionId /*peer*/, void* /*userData*/) {
+}
+
+void TaskbarWindow::AddTaskButton(uint32_t pid, uint64_t hwnd, const wchar_t* title) {
+    std::lock_guard<std::mutex> lock(m_btnMutex);
+    for (const auto& btn : m_buttons) {
+        if (btn.hwnd == hwnd) return;
+    }
+    TaskButton btn{};
+    btn.pid = pid;
+    btn.hwnd = hwnd;
+    btn.title = title ? title : L"";
+    btn.active = false;
+    m_buttons.push_back(btn);
+    InvalidateRect(m_hwnd, nullptr, TRUE);
+}
+
+void TaskbarWindow::RemoveTaskButton(uint64_t hwnd) {
+    std::lock_guard<std::mutex> lock(m_btnMutex);
+    for (auto it = m_buttons.begin(); it != m_buttons.end(); ++it) {
+        if (it->hwnd == hwnd) {
+            m_buttons.erase(it);
+            break;
+        }
+    }
+    InvalidateRect(m_hwnd, nullptr, TRUE);
+}
+
+void TaskbarWindow::UpdateTaskButtonTitle(uint64_t hwnd, const wchar_t* title) {
+    std::lock_guard<std::mutex> lock(m_btnMutex);
+    for (auto& btn : m_buttons) {
+        if (btn.hwnd == hwnd) {
+            btn.title = title ? title : L"";
+            break;
+        }
+    }
+    InvalidateRect(m_hwnd, nullptr, TRUE);
 }
 
 LRESULT CALLBACK TaskbarWindow::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
