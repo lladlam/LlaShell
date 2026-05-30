@@ -23,6 +23,7 @@
 #include <atomic>
 #include <functional>
 #include <unordered_set>
+#include <cstddef>
 
 #include "CoreIPC/CoreIPC.h"
 #include "ipc_messages.h"
@@ -56,19 +57,33 @@ public:
 
 private:
     static constexpr int kDefaultTaskbarHeight = 40;
-    static constexpr int kDefaultButtonWidth   = 180;
-    static constexpr int kDefaultButtonHeight  = 34;
+    static constexpr int kDefaultButtonWidth   = 48;
+    static constexpr int kDefaultButtonHeight  = 40;
     static constexpr int kStartBtnWidth        = 48;
-    static constexpr int kSearchBtnWidth       = 40;
-    static constexpr int kTrayAreaMinWidth     = 300;
+    static constexpr int kSearchBtnWidth       = 48;
+    static constexpr int kTaskViewBtnWidth     = 48;
+    static constexpr int kTrayAreaMinWidth     = 150;
     static constexpr int kTrayIconSize         = 16;
-    static constexpr int kClockWidth           = 70;
-    static constexpr int kNotifBtnWidth        = 40;
+    static constexpr int kClockWidth           = 78;
+    static constexpr int kNotifBtnWidth        = 32;
     static constexpr int kShowDesktopWidth     = 6;
     static constexpr int kActiveBarHeight      = 3;
-    static constexpr int kButtonPad            = 2;
+    static constexpr int kButtonPad            = 0;
     static constexpr int kIconTextGap          = 6;
     static constexpr int kButtonIconSize       = 24;
+
+    enum PopupMenuKind {
+        PopupMenuNone,
+        PopupMenuTaskbar,
+        PopupMenuTaskButton,
+        PopupMenuStart
+    };
+
+    struct PopupMenuItem {
+        int id;
+        std::wstring label;
+        bool separator;
+    };
 
     int m_taskbarHeight;
     int m_buttonWidth;
@@ -81,6 +96,7 @@ private:
     void DrawTaskbar(HDC hdc, const RECT& rc);
     void DrawStartButton(HDC hdc, const RECT& rc);
     void DrawSearchButton(HDC hdc, const RECT& rc);
+    void DrawTaskViewButton(HDC hdc, const RECT& rc);
     void DrawTaskButtons(HDC hdc, const RECT& rc);
     void DrawTrayArea(HDC hdc, const RECT& rc);
     void DrawClock(HDC hdc, const RECT& rc);
@@ -88,8 +104,14 @@ private:
     void DrawShowDesktop(HDC hdc, const RECT& rc);
     void DrawActiveIndicator(HDC hdc, const RECT& btnRc, COLORREF color);
     void DrawHoverHighlight(HDC hdc, const RECT& btnRc);
+    void DrawCalendarFlyout(HWND hwnd, HDC hdc, const RECT& rc);
+    void DrawTrayFlyout(HWND hwnd, HDC hdc, const RECT& rc);
+    void DrawPopupMenu(HWND hwnd, HDC hdc, const RECT& rc);
 
     void HandleClick(int x, int y);
+    void HandleMouseDown(int x, int y);
+    void HandleMouseMove(int x, int y);
+    bool HandleMouseUp(int x, int y);
     void HandleMiddleClick(int x, int y);
     void HandleRightClick(int x, int y);
     void HandleTaskButtonRightClick(int index, int screenX, int screenY);
@@ -111,7 +133,31 @@ private:
     void RegisterGlobalHotkeys();
     void ShowStartMenu(int screenX, int screenY);
     void ShowTaskbarContextMenu(int screenX, int screenY);
+    void ShowStartContextMenu(int screenX, int screenY);
+    void ShowPopupMenu(PopupMenuKind kind, int taskButtonIndex, int screenX, int screenY);
+    void ExecutePopupCommand(int commandId);
     void OpenTaskManager();
+    void ToggleDesktop();
+    static BOOL CALLBACK ToggleDesktopEnumProc(HWND hwnd, LPARAM lParam);
+    std::wstring GetInputMethodIndicator() const;
+    void ShowCalendarFlyout();
+    void HideCalendarFlyout();
+    void ShowTrayFlyout();
+    void HideTrayFlyout();
+    void SyncTrayIconsFromButtons();
+    void ShowTrayTooltip(const std::wstring& text, const RECT& screenRect);
+    void HideTrayTooltip();
+    void BeginTrayIconDrag(std::uintptr_t iconId, bool fromFlyout);
+    bool FinishTrayIconDrag(POINT screenPt);
+    bool HitTestTrayIcon(int x, int y, bool hiddenOnly, std::uintptr_t* iconId, std::wstring* title, RECT* rect) const;
+    bool IsPointInTaskbarTray(POINT screenPt) const;
+    bool IsPointInHiddenTray(POINT screenPt) const;
+    void SetTrayIconHidden(std::uintptr_t iconId, bool hidden);
+    void LaunchRunDialog();
+
+    static LRESULT CALLBACK CalendarWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    static LRESULT CALLBACK TrayFlyoutWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    static LRESULT CALLBACK PopupMenuWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
     void InitIPC();
     void ShutdownIPC();
@@ -127,13 +173,20 @@ private:
 
     HWND                            m_hwnd;
     HINSTANCE                       m_hInstance;
+    HWND                            m_calendarHwnd;
+    HWND                            m_trayFlyoutHwnd;
+    HWND                            m_tooltipHwnd;
+    HWND                            m_popupMenuHwnd;
     std::vector<TaskButton>         m_buttons;
     mutable std::mutex              m_btnMutex;
+    std::vector<HWND>               m_desktopRestoreWindows;
+    std::mutex                      m_desktopMutex;
 
     std::thread                     m_fsDetectThread;
     std::thread                     m_windowMonitorThread;
     std::atomic<bool>               m_running;
     std::atomic<bool>               m_isHidden;
+    std::atomic<bool>               m_showingDesktop;
 
     HFONT                           m_font;
     HFONT                           m_fontSmall;
@@ -148,6 +201,26 @@ private:
 
     int                             m_hoverIndex;
     int                             m_activeIndex;
+    std::uintptr_t                  m_hoverTrayIconId;
+    std::uintptr_t                  m_dragTrayIconId;
+    bool                            m_dragTrayIconFromFlyout;
+
+    PopupMenuKind                   m_popupMenuKind;
+    int                             m_popupTaskButtonIndex;
+    std::vector<PopupMenuItem>      m_popupItems;
+
+    struct TrayIconItem {
+        std::uintptr_t id;
+        std::wstring   title;
+        HICON          icon;
+        bool           hidden;
+        RECT           rect;
+    };
+    std::vector<TrayIconItem>       m_trayIcons;
+    mutable std::mutex              m_trayMutex;
+    RECT                            m_hiddenTrayButtonRect;
+    RECT                            m_trayAreaRect;
+    RECT                            m_clockRect;
 
     struct PinnedApp {
         std::wstring exePath;

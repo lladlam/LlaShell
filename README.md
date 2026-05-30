@@ -2,6 +2,18 @@
   <img src="LlaShell.png" width="256" height="256" alt="LlaShell Logo">
 </p>
 
+<link href="https://fonts.geekzu.org/css2?family=Nunito:wght@700&text=LaShel&display=swap" rel="stylesheet">
+
+<p align="center" style="font-family: 'Nunito', sans-serif; font-size: 32px; font-weight: 700; display: flex; align-items: center; justify-content: center; gap: 10px; letter-spacing: -0.5px;">
+  <span style="color: #f492b6;">✦</span>
+  
+  <span style="background: linear-gradient(to right, #ee7bb0 40%, #9983e6 40%); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
+    LlaShell
+  </span>
+  
+  <span style="color: #9cbbf7;">✦</span>
+</p>
+
 <h3 align="center" style="color:#888888">一款开源，好用，占用低的第三方资源管理器</h3>
 
 <p align="center" style="color:#666666">由 lladlam 开发</p>
@@ -11,7 +23,7 @@
     <img src="https://img.shields.io/badge/正式版-0.0.0.1-blue?style=flat-square" alt="Release">
   </a>
   <a href="https://github.com/lladlam/LlaShell/releases">
-    <img src="https://img.shields.io/badge/测试版-0.0.0.1--beta-orange?style=flat-square" alt="Pre-release">
+    <img src="https://img.shields.io/badge/测试版-0.0.0.1-orange?style=flat-square" alt="Pre-release">
   </a>
 </p>
 

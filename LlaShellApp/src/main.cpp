@@ -468,11 +468,12 @@ static void DrawAboutPanel(HDC hdc, const RECT& rc) {
     y += 12;
 
     SetTextColor(hdc, RGB(100, 100, 120));
-    RECT licRc = { cx, y, cx + w, y + 60 };
+    RECT licRc = { cx, y, cx + w, y + 84 };
     DrawTextW(hdc,
-        L"Copyright (C) lladlam. All rights reserved.\n"
-        L"本软件遵循 LlaShell License 发布。\n"
-        L"详见 LICENSE 文件及 THIRD_PARTY_LICENSES.txt",
+        L"Copyright 2026 lladlam\n"
+        L"本软件基于 Apache License, Version 2.0 授权发布。\n"
+        L"许可证文本: http://www.apache.org/licenses/LICENSE-2.0\n"
+        L"软件按 \"AS IS\" 提供；详见 LICENSE 及 THIRD_PARTY_LICENSES.txt",
         -1, &licRc, DT_LEFT | DT_WORDBREAK);
 
     SelectObject(hdc, oldFont);
