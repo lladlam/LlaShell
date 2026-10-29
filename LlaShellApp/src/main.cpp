@@ -12,6 +12,9 @@
 #include <atomic>
 #include <mutex>
 
+#include "shell_utils.h"
+#include "shell_enhancements.h"
+
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "comctl32.lib")
@@ -50,6 +53,7 @@ struct AppState {
     HWND                hwndChkDisableCheck;
     HWND                hwndChkDisableCompletely;
     HWND                hwndStatus;
+    HWND                hwndSetDefaultBtn;
     HINSTANCE           hInstance;
     HICON               hIcon;
     NOTIFYICONDATAW     nid;
@@ -510,6 +514,13 @@ static void CreateSettingsControls(HWND hwndParent) {
         WS_CHILD | WS_VISIBLE | SS_LEFT,
         contentX + 24, 264, contentW - 48, 24, hwndParent, (HMENU)1005, g_app.hInstance, nullptr);
     SendMessageW(g_app.hwndStatus, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+
+    // 设为默认资源管理器按钮
+    g_app.hwndSetDefaultBtn = CreateWindowExW(0, L"BUTTON", L"",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        contentX + 24, 300, 160, 32, hwndParent, (HMENU)1006, g_app.hInstance, nullptr);
+    SendMessageW(g_app.hwndSetDefaultBtn, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+    UpdateSetDefaultButtonText();
 }
 
 static void ShowUpdateControls(bool show) {
@@ -519,6 +530,14 @@ static void ShowUpdateControls(bool show) {
     ShowWindow(g_app.hwndChkDisableCheck, cmd);
     ShowWindow(g_app.hwndChkDisableCompletely, cmd);
     ShowWindow(g_app.hwndStatus, cmd);
+    ShowWindow(g_app.hwndSetDefaultBtn, cmd);
+}
+
+static void UpdateSetDefaultButtonText() {
+    if (!g_app.hwndSetDefaultBtn) return;
+    bool isDefault = LlaShell::ShellUtils::IsDefaultExplorer();
+    SetWindowTextW(g_app.hwndSetDefaultBtn,
+        isDefault ? L"恢复默认资源管理器" : L"设为默认资源管理器");
 }
 
 static void SyncCheckboxes() {
@@ -639,6 +658,13 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             g_app.updateSettings.disableCompletely =
                 (SendMessageW(g_app.hwndChkDisableCompletely, BM_GETCHECK, 0, 0) == BST_CHECKED);
             SaveUpdateSettings();
+        } else if (LOWORD(wParam) == 1006) {
+            if (LlaShell::ShellUtils::IsDefaultExplorer()) {
+                LlaShell::ShellUtils::RestoreDefaultExplorer();
+            } else {
+                LlaShell::ShellUtils::SetAsDefaultExplorer();
+            }
+            UpdateSetDefaultButtonText();
         }
         return 0;
     case WM_TRAYICON:
@@ -691,6 +717,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     g_app.activeCategory = CAT_UPDATE;
     g_app.checking.store(false);
     g_app.updateAvailable.store(false);
+
+    ShellEnh::EnablePerMonitorDpi();
 
     INITCOMMONCONTROLSEX icex{};
     icex.dwSize = sizeof(icex);

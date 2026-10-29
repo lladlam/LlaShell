@@ -1,4 +1,5 @@
 #include "mainui.h"
+#include "shell_enhancements.h"
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shlwapi.h>
@@ -152,6 +153,11 @@ void MainWindow::Shutdown() {
     }
     m_tabs.clear();
 
+    for (auto& path : m_treePaths) {
+        if (path) free(path);
+    }
+    m_treePaths.clear();
+
     if (m_hwnd) {
         DestroyWindow(m_hwnd);
         m_hwnd = nullptr;
@@ -224,6 +230,12 @@ void MainWindow::CreateTreeView() {
 void MainWindow::PopulateTreeView() {
     TreeView_DeleteAllItems(m_treeView);
 
+    // 清理旧的路径字符串
+    for (auto& path : m_treePaths) {
+        if (path) free(path);
+    }
+    m_treePaths.clear();
+
     TVINSERTSTRUCTW tvis{};
     tvis.hParent = TVI_ROOT;
     tvis.hInsertAfter = TVI_LAST;
@@ -246,9 +258,11 @@ void MainWindow::PopulateTreeView() {
             else
                 StringCchPrintfW(label, _countof(label), L"本地磁盘 (%c:)", drv[0]);
 
+            wchar_t* dupDrv = _wcsdup(drv);
             tvis.hParent = root;
             tvis.item.pszText = label;
-            tvis.item.lParam = (LPARAM)_wcsdup(drv);
+            tvis.item.lParam = (LPARAM)dupDrv;
+            m_treePaths.push_back(dupDrv);
             TreeView_InsertItem(m_treeView, &tvis);
 
             drv += wcslen(drv) + 1;
@@ -784,14 +798,22 @@ LRESULT CALLBACK MainWindow::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
             int listH = rc.bottom - toolbarH - kStatusBarHeight;
 
             RECT listRc = { listX, toolbarH, listX + listW, toolbarH + listH };
-            FillRect(hdc, &listRc, self->m_bgBrush);
+
+            ShellEnh::DoubleBuffer db;
+            HDC hdcDraw = hdc;
+            if (db.SmartBegin(hdc, &ps.rcPaint)) {
+                hdcDraw = db.GetHDC();
+                if (!hdcDraw) hdcDraw = hdc;
+            }
+
+            FillRect(hdcDraw, &listRc, self->m_bgBrush);
 
             std::lock_guard<std::mutex> lock(self->m_tabMutex);
             if (self->m_activeTab >= 0 && self->m_activeTab < (int)self->m_tabs.size()) {
                 const auto& tab = self->m_tabs[self->m_activeTab];
-                HFONT oldFont = (HFONT)SelectObject(hdc, self->m_font);
-                SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, RGB(220, 220, 220));
+                HFONT oldFont = (HFONT)SelectObject(hdcDraw, self->m_font);
+                SetBkMode(hdcDraw, TRANSPARENT);
+                SetTextColor(hdcDraw, RGB(220, 220, 220));
 
                 int y = toolbarH + 4;
                 int iconSize = 16;
@@ -802,13 +824,13 @@ LRESULT CALLBACK MainWindow::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
                     if (y + rowH > toolbarH + listH) break;
 
                     if (entry.icon) {
-                        DrawIconEx(hdc, listX + 8, y + (rowH - iconSize) / 2,
+                        DrawIconEx(hdcDraw, listX + 8, y + (rowH - iconSize) / 2,
                                    entry.icon, iconSize, iconSize, 0, nullptr, DI_NORMAL);
                     }
 
                     RECT textRc = { listX + 30, y, listX + listW - 8, y + rowH };
-                    SetTextColor(hdc, entry.isDirectory ? RGB(100, 180, 255) : RGB(220, 220, 220));
-                    DrawTextW(hdc, entry.name.c_str(), -1, &textRc,
+                    SetTextColor(hdcDraw, entry.isDirectory ? RGB(100, 180, 255) : RGB(220, 220, 220));
+                    DrawTextW(hdcDraw, entry.name.c_str(), -1, &textRc,
                         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
                     if (entry.size > 0 && !entry.isDirectory) {
@@ -825,17 +847,19 @@ LRESULT CALLBACK MainWindow::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
                         else
                             StringCchPrintfW(sizeBuf, _countof(sizeBuf), L"%llu B", entry.size);
 
-                        SetTextColor(hdc, RGB(140, 140, 160));
+                        SetTextColor(hdcDraw, RGB(140, 140, 160));
                         RECT sizeRc = { listX + listW - 100, y, listX + listW - 8, y + rowH };
-                        DrawTextW(hdc, sizeBuf, -1, &sizeRc,
+                        DrawTextW(hdcDraw, sizeBuf, -1, &sizeRc,
                             DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
                     }
 
                     y += rowH;
                 }
 
-                SelectObject(hdc, oldFont);
+                SelectObject(hdcDraw, oldFont);
             }
+
+            db.SmartEnd();
         }
         EndPaint(hWnd, &ps);
         return 0;
@@ -886,6 +910,7 @@ LRESULT CALLBACK MainWindow::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR lpCmdLine, int nCmdShow) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    ShellEnh::EnablePerMonitorDpi();
 
     LlaShell::MainWindow mainWnd;
     const wchar_t* initialPath = (lpCmdLine && lpCmdLine[0]) ? lpCmdLine : nullptr;

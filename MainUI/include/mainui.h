@@ -139,6 +139,9 @@ private:
     IPC::SessionId          m_mediaParserSession;
     std::atomic<bool>       m_ipcReady;
     std::atomic<uint32_t>   m_nextThumbnailRequestId;
+
+    // 跟踪 _wcsdup 分配的路径字符串（TreeView lParam）
+    std::vector<wchar_t*>   m_treePaths;
 };
 
 } // namespace LlaShell

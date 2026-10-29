@@ -77,6 +77,8 @@ target_link_libraries(Desktop PRIVATE
     shell32
     gdi32
     ole32
+    dwmapi
+    uxtheme
 )
 if(NOT MSVC)
     target_link_options(Desktop PRIVATE -municode)
@@ -96,6 +98,8 @@ target_link_libraries(Taskbar PRIVATE
     gdi32
     comctl32
     shlwapi
+    dwmapi
+    uxtheme
 )
 if(NOT MSVC)
     target_link_options(Taskbar PRIVATE -municode)
@@ -116,6 +120,8 @@ target_link_libraries(MainUI PRIVATE
     gdi32
     comctl32
     ole32
+    dwmapi
+    uxtheme
 )
 if(NOT MSVC)
     target_link_options(MainUI PRIVATE -municode)
@@ -185,6 +191,8 @@ target_link_libraries(LlaShell PRIVATE
     wininet
     gdi32
     ole32
+    dwmapi
+    uxtheme
 )
 if(NOT MSVC)
     target_link_options(LlaShell PRIVATE -municode)

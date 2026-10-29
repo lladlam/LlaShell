@@ -1,6 +1,11 @@
 #include "taskbar.h"
+#include "shell_enhancements.h"
 
 namespace LlaShell {
+
+// 前置声明
+static ShellEnh::AppBar g_appBar;
+static ShellEnh::WinEventWatcher* g_winEventWatcher = nullptr;
 
 TaskbarWindow::TaskbarWindow()
     : m_taskbarHeight(kDefaultTaskbarHeight)
@@ -128,6 +133,64 @@ bool TaskbarWindow::Create(HINSTANCE hInstance) {
     RegisterGlobalHotkeys();
     LoadPinnedApps();
 
+    // 启用 Per-Monitor DPI 感知
+    ShellEnh::EnablePerMonitorDpi();
+
+    // 设置任务栏圆角（Win11）
+    ShellEnh::SetRoundedCorners(m_hwnd, 0); // 任务栏不需要圆角
+
+    // AppBar 注册（让系统知道任务栏位置）
+    g_appBar.SetThickness(m_taskbarHeight);
+    g_appBar.Register(m_hwnd, WM_APP + 100, ABE_BOTTOM);
+
+    // 事件驱动窗口枚举（替代部分轮询）
+    g_winEventWatcher = new ShellEnh::WinEventWatcher();
+    ShellEnh::WinEventWatcher::Callbacks cbs{};
+    cbs.userData = this;
+    cbs.onWindowCreated = [](HWND hwnd, void* userData) {
+        auto* self = static_cast<TaskbarWindow*>(userData);
+        if (self && ShellEnh::IsAltTabWindow(hwnd)) {
+            self->EnumerateWindows();
+        }
+    };
+    cbs.onWindowDestroyed = [](HWND hwnd, void* userData) {
+        auto* self = static_cast<TaskbarWindow*>(userData);
+        if (self) {
+            std::lock_guard<std::mutex> lock(self->m_btnMutex);
+            for (auto it = self->m_buttons.begin(); it != self->m_buttons.end(); ) {
+                if (it->hwnd == hwnd && !it->pinned) {
+                    it = self->m_buttons.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            self->SyncTrayIconsFromButtons();
+            InvalidateRect(self->m_hwnd, nullptr, TRUE);
+        }
+    };
+    cbs.onForegroundChanged = [](HWND hwnd, void* userData) {
+        auto* self = static_cast<TaskbarWindow*>(userData);
+        if (self) {
+            std::lock_guard<std::mutex> lock(self->m_btnMutex);
+            for (auto& btn : self->m_buttons) {
+                btn.active = (btn.hwnd == hwnd);
+            }
+            InvalidateRect(self->m_hwnd, nullptr, FALSE);
+        }
+    };
+    cbs.onMinimizeStart = [](HWND, void* userData) {
+        auto* self = static_cast<TaskbarWindow*>(userData);
+        if (self) InvalidateRect(self->m_hwnd, nullptr, FALSE);
+    };
+    cbs.onMinimizeEnd = [](HWND, void* userData) {
+        auto* self = static_cast<TaskbarWindow*>(userData);
+        if (self) InvalidateRect(self->m_hwnd, nullptr, FALSE);
+    };
+    g_winEventWatcher->Start(cbs);
+
+    // 注册电源状态通知（屏幕开关时隐藏/显示任务栏）
+    ShellEnh::RegisterPowerNotifications(m_hwnd);
+
     NOTIFYICONDATAW nid{};
     nid.cbSize = sizeof(nid);
     nid.hWnd = m_hwnd;
@@ -157,6 +220,17 @@ void TaskbarWindow::Show() {
 
 void TaskbarWindow::Shutdown() {
     ShutdownIPC();
+
+    // 清理 AppBar
+    g_appBar.Unregister();
+
+    // 清理事件监听
+    if (g_winEventWatcher) {
+        g_winEventWatcher->Stop();
+        delete g_winEventWatcher;
+        g_winEventWatcher = nullptr;
+    }
+
     m_running = false;
     HideTrayTooltip();
     HideCalendarFlyout();
@@ -598,12 +672,16 @@ std::wstring TaskbarWindow::GetInputMethodIndicator() const {
 }
 
 void TaskbarWindow::DrawPopupMenu(HWND hwnd, HDC hdc, const RECT& rc) {
-    HBRUSH bg = CreateSolidBrush(RGB(43, 43, 43));
-    HBRUSH hover = CreateSolidBrush(RGB(62, 62, 62));
-    HPEN border = CreatePen(PS_SOLID, 1, RGB(92, 92, 92));
-    FillRect(hdc, &rc, bg);
+    // 使用栈上 GDI 对象，自动清理
+    struct ScopedBrush { HBRUSH h; ScopedBrush(COLORREF c) : h(CreateSolidBrush(c)) {} ~ScopedBrush() { if (h) DeleteObject(h); } };
+    struct ScopedPen   { HPEN h;   ScopedPen(int w, COLORREF c) : h(CreatePen(PS_SOLID, w, c)) {} ~ScopedPen() { if (h) DeleteObject(h); } };
 
-    HPEN oldPen = (HPEN)SelectObject(hdc, border);
+    ScopedBrush bg(RGB(43, 43, 43));
+    ScopedBrush hover(RGB(62, 62, 62));
+    ScopedPen border(1, RGB(92, 92, 92));
+    FillRect(hdc, &rc, bg.h);
+
+    HPEN oldPen = (HPEN)SelectObject(hdc, border.h);
     HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
     Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
     SelectObject(hdc, oldBrush);
@@ -621,14 +699,14 @@ void TaskbarWindow::DrawPopupMenu(HWND hwnd, HDC hdc, const RECT& rc) {
     int y = Scale(1);
     for (const auto& item : m_popupItems) {
         RECT itemRc = { Scale(1), y, rc.right - Scale(1), y + itemH };
-        if (PtInRect(&itemRc, pt)) FillRect(hdc, &itemRc, hover);
+        if (PtInRect(&itemRc, pt)) FillRect(hdc, &itemRc, hover.h);
 
         RECT textRc = { Scale(34), y, rc.right - Scale(12), y + itemH };
         DrawTextW(hdc, item.label.c_str(), -1, &textRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
         if (m_popupMenuKind == PopupMenuTaskButton && item.id == 3) {
-            HPEN closePen = CreatePen(PS_SOLID, 1, RGB(230, 230, 230));
-            HPEN oldClosePen = (HPEN)SelectObject(hdc, closePen);
+            ScopedPen closePen(1, RGB(230, 230, 230));
+            HPEN oldClosePen = (HPEN)SelectObject(hdc, closePen.h);
             int cx = Scale(17);
             int cy = y + itemH / 2;
             MoveToEx(hdc, cx - Scale(5), cy - Scale(5), nullptr);
@@ -636,16 +714,13 @@ void TaskbarWindow::DrawPopupMenu(HWND hwnd, HDC hdc, const RECT& rc) {
             MoveToEx(hdc, cx + Scale(5), cy - Scale(5), nullptr);
             LineTo(hdc, cx - Scale(5), cy + Scale(5));
             SelectObject(hdc, oldClosePen);
-            DeleteObject(closePen);
         }
 
         y += itemH;
     }
 
     SelectObject(hdc, oldFont);
-    DeleteObject(border);
-    DeleteObject(hover);
-    DeleteObject(bg);
+    // bg/hover/border 由 ScopedBrush/ScopedPen 自动清理
 }
 
 static int DaysInMonth(int year, int month) {
@@ -669,13 +744,19 @@ static int DayOfWeekSundayFirst(int year, int month, int day) {
 }
 
 void TaskbarWindow::DrawCalendarFlyout(HWND, HDC hdc, const RECT& rc) {
-    HBRUSH bg = CreateSolidBrush(RGB(31, 31, 31));
-    HBRUSH panel = CreateSolidBrush(RGB(36, 36, 36));
-    HBRUSH todayBrush = CreateSolidBrush(m_accentColor);
-    HPEN border = CreatePen(PS_SOLID, 1, RGB(72, 72, 72));
-    FillRect(hdc, &rc, bg);
+    struct ScopedBrush { HBRUSH h; ScopedBrush(COLORREF c) : h(CreateSolidBrush(c)) {} ~ScopedBrush() { if (h) DeleteObject(h); } };
+    struct ScopedPen   { HPEN h;   ScopedPen(int w, COLORREF c) : h(CreatePen(PS_SOLID, w, c)) {} ~ScopedPen() { if (h) DeleteObject(h); } };
+    struct ScopedFont  { HFONT h;  ScopedFont(int px, int weight) : h(CreateFontW(-px, 0, 0, 0, weight, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI")) {}
+        ~ScopedFont() { if (h) DeleteObject(h); } };
 
-    HPEN oldPen = (HPEN)SelectObject(hdc, border);
+    ScopedBrush bg(RGB(31, 31, 31));
+    ScopedBrush panel(RGB(36, 36, 36));
+    ScopedBrush todayBrush(m_accentColor);
+    ScopedPen border(1, RGB(72, 72, 72));
+    FillRect(hdc, &rc, bg.h);
+
+    HPEN oldPen = (HPEN)SelectObject(hdc, border.h);
     HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
     Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
     SelectObject(hdc, oldBrush);
@@ -685,15 +766,11 @@ void TaskbarWindow::DrawCalendarFlyout(HWND, HDC hdc, const RECT& rc) {
     GetLocalTime(&st);
     const wchar_t* weekNames[] = { L"星期日", L"星期一", L"星期二", L"星期三", L"星期四", L"星期五", L"星期六" };
 
-    HFONT timeFont = CreateFontW(-Scale(48), 0, 0, 0, FW_LIGHT, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-    HFONT monthFont = CreateFontW(-Scale(15), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    ScopedFont timeFont(48, FW_LIGHT);
+    ScopedFont monthFont(15, FW_NORMAL);
 
     SetBkMode(hdc, TRANSPARENT);
-    HFONT oldFont = (HFONT)SelectObject(hdc, timeFont);
+    HFONT oldFont = (HFONT)SelectObject(hdc, timeFont.h);
     SetTextColor(hdc, RGB(255, 255, 255));
 
     wchar_t timeBuf[32]{};
@@ -708,24 +785,25 @@ void TaskbarWindow::DrawCalendarFlyout(HWND, HDC hdc, const RECT& rc) {
     RECT dateRc = { Scale(24), Scale(86), rc.right - Scale(24), Scale(112) };
     DrawTextW(hdc, dateBuf, -1, &dateRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
+    // 分隔线
     RECT lowerRc = { rc.left, Scale(116), rc.right, rc.bottom };
-    FillRect(hdc, &lowerRc, panel);
-    HPEN sep = CreatePen(PS_SOLID, 1, RGB(70, 70, 70));
-    HPEN oldSep = (HPEN)SelectObject(hdc, sep);
+    FillRect(hdc, &lowerRc, panel.h);
+    ScopedPen sep(1, RGB(70, 70, 70));
+    HPEN oldSep = (HPEN)SelectObject(hdc, sep.h);
     MoveToEx(hdc, rc.left, lowerRc.top, nullptr);
     LineTo(hdc, rc.right, lowerRc.top);
     SelectObject(hdc, oldSep);
-    DeleteObject(sep);
 
-    SelectObject(hdc, monthFont);
+    SelectObject(hdc, monthFont.h);
     SetTextColor(hdc, RGB(245, 245, 245));
     wchar_t monthBuf[32]{};
     StringCchPrintfW(monthBuf, _countof(monthBuf), L"%d年%d月", st.wYear, st.wMonth);
     RECT monthRc = { Scale(24), Scale(132), rc.right - Scale(110), Scale(162) };
     DrawTextW(hdc, monthBuf, -1, &monthRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    HPEN arrowPen = CreatePen(PS_SOLID, 1, RGB(220, 220, 220));
-    HPEN oldArrow = (HPEN)SelectObject(hdc, arrowPen);
+    // 月份导航箭头
+    ScopedPen arrowPen(1, RGB(220, 220, 220));
+    HPEN oldArrow = (HPEN)SelectObject(hdc, arrowPen.h);
     int upX = rc.right - Scale(84);
     int downX = rc.right - Scale(38);
     int arrowY = Scale(146);
@@ -736,9 +814,8 @@ void TaskbarWindow::DrawCalendarFlyout(HWND, HDC hdc, const RECT& rc) {
     LineTo(hdc, downX, arrowY + Scale(4));
     LineTo(hdc, downX + Scale(7), arrowY - Scale(4));
     SelectObject(hdc, oldArrow);
-    DeleteObject(arrowPen);
 
-    SelectObject(hdc, m_fontSmall);
+    SelectObject(hdc, m_fontSmall.h);
     const wchar_t* weekdays[] = { L"一", L"二", L"三", L"四", L"五", L"六", L"日" };
     int gridLeft = Scale(22);
     int gridTop = Scale(174);
@@ -776,19 +853,19 @@ void TaskbarWindow::DrawCalendarFlyout(HWND, HDC hdc, const RECT& rc) {
                 dayTop + (row + 1) * cellH
             };
 
+            // 今天高亮
             if (currentMonth && shownDay == st.wDay) {
                 RECT fillRc = {
                     cellRc.left + Scale(6), cellRc.top + Scale(3),
                     cellRc.right - Scale(6), cellRc.bottom - Scale(3)
                 };
-                FillRect(hdc, &fillRc, todayBrush);
-                HPEN focusPen = CreatePen(PS_SOLID, 1, RGB(0, 0, 0));
-                HPEN oldFocus = (HPEN)SelectObject(hdc, focusPen);
+                FillRect(hdc, &fillRc, todayBrush.h);
+                ScopedPen focusPen(1, RGB(0, 0, 0));
+                HPEN oldFocus = (HPEN)SelectObject(hdc, focusPen.h);
                 HBRUSH oldFocusBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
                 Rectangle(hdc, fillRc.left + Scale(2), fillRc.top + Scale(2), fillRc.right - Scale(2), fillRc.bottom - Scale(2));
                 SelectObject(hdc, oldFocusBrush);
                 SelectObject(hdc, oldFocus);
-                DeleteObject(focusPen);
             }
 
             SetTextColor(hdc, currentMonth ? RGB(245, 245, 245) : RGB(125, 125, 125));
@@ -799,21 +876,19 @@ void TaskbarWindow::DrawCalendarFlyout(HWND, HDC hdc, const RECT& rc) {
     }
 
     SelectObject(hdc, oldFont);
-    DeleteObject(monthFont);
-    DeleteObject(timeFont);
-    DeleteObject(border);
-    DeleteObject(todayBrush);
-    DeleteObject(panel);
-    DeleteObject(bg);
+    // bg/panel/todayBrush/border/timeFont/monthFont 由 Scoped* 自动清理
 }
 
 void TaskbarWindow::DrawTrayFlyout(HWND hwnd, HDC hdc, const RECT& rc) {
-    HBRUSH bg = CreateSolidBrush(RGB(243, 243, 243));
-    HBRUSH hover = CreateSolidBrush(RGB(225, 225, 225));
-    HPEN border = CreatePen(PS_SOLID, 1, RGB(150, 150, 150));
-    FillRect(hdc, &rc, bg);
+    struct ScopedBrush { HBRUSH h; ScopedBrush(COLORREF c) : h(CreateSolidBrush(c)) {} ~ScopedBrush() { if (h) DeleteObject(h); } };
+    struct ScopedPen   { HPEN h;   ScopedPen(int w, COLORREF c) : h(CreatePen(PS_SOLID, w, c)) {} ~ScopedPen() { if (h) DeleteObject(h); } };
 
-    HPEN oldPen = (HPEN)SelectObject(hdc, border);
+    ScopedBrush bg(RGB(243, 243, 243));
+    ScopedBrush hover(RGB(225, 225, 225));
+    ScopedPen border(1, RGB(150, 150, 150));
+    FillRect(hdc, &rc, bg.h);
+
+    HPEN oldPen = (HPEN)SelectObject(hdc, border.h);
     HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
     Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
     SelectObject(hdc, oldBrush);
@@ -839,7 +914,7 @@ void TaskbarWindow::DrawTrayFlyout(HWND hwnd, HDC hdc, const RECT& rc) {
         int row = index / cols;
         RECT iconRc = { x0 + col * slot, y0 + row * slot, x0 + (col + 1) * slot, y0 + (row + 1) * slot };
         icon.rect = iconRc;
-        if (PtInRect(&iconRc, pt)) FillRect(hdc, &iconRc, hover);
+        if (PtInRect(&iconRc, pt)) FillRect(hdc, &iconRc, hover.h);
         if (icon.icon) {
             DrawIconEx(hdc,
                 iconRc.left + (slot - Scale(kTrayIconSize)) / 2,
@@ -860,9 +935,7 @@ void TaskbarWindow::DrawTrayFlyout(HWND hwnd, HDC hdc, const RECT& rc) {
         SelectObject(hdc, oldFont);
     }
 
-    DeleteObject(border);
-    DeleteObject(hover);
-    DeleteObject(bg);
+    // bg/hover/border 由 ScopedBrush/ScopedPen 自动清理
 }
 
 #pragma endregion
@@ -1049,17 +1122,20 @@ void TaskbarWindow::ShowStartMenu(int screenX, int screenY) {
     int itemH = Scale(40);
     int iy = 0;
 
-    HBRUSH menuBg = CreateSolidBrush(RGB(30, 30, 46));
-    HBRUSH menuHover = CreateSolidBrush(RGB(50, 50, 80));
-    HPEN menuBorder = CreatePen(PS_SOLID, 1, RGB(60, 60, 80));
+    struct ScopedBrush { HBRUSH h; ScopedBrush(COLORREF c) : h(CreateSolidBrush(c)) {} ~ScopedBrush() { if (h) DeleteObject(h); } };
+    struct ScopedPen   { HPEN h;   ScopedPen(int w, COLORREF c) : h(CreatePen(PS_SOLID, w, c)) {} ~ScopedPen() { if (h) DeleteObject(h); } };
+
+    ScopedBrush menuBg(RGB(30, 30, 46));
+    ScopedBrush menuHover(RGB(50, 50, 80));
+    ScopedPen menuBorder(1, RGB(60, 60, 80));
 
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(hMenuWnd, &ps);
     RECT menuRc;
     GetClientRect(hMenuWnd, &menuRc);
-    FillRect(hdc, &menuRc, menuBg);
+    FillRect(hdc, &menuRc, menuBg.h);
 
-    HPEN oldPen = (HPEN)SelectObject(hdc, menuBorder);
+    HPEN oldPen = (HPEN)SelectObject(hdc, menuBorder.h);
     HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
     Rectangle(hdc, menuRc.left, menuRc.top, menuRc.right, menuRc.bottom);
     SelectObject(hdc, oldBrush);
@@ -1071,18 +1147,17 @@ void TaskbarWindow::ShowStartMenu(int screenX, int screenY) {
     for (auto& item : items) {
         if (item.id == -1) {
             iy += Scale(8);
-            HPEN sepPen = CreatePen(PS_SOLID, 1, RGB(55, 55, 75));
-            HPEN oldSepPen = (HPEN)SelectObject(hdc, sepPen);
+            ScopedPen sepPen(1, RGB(55, 55, 75));
+            HPEN oldSepPen = (HPEN)SelectObject(hdc, sepPen.h);
             MoveToEx(hdc, Scale(12), iy, nullptr);
             LineTo(hdc, menuW - Scale(12), iy);
             SelectObject(hdc, oldSepPen);
-            DeleteObject(sepPen);
             iy += Scale(8);
             continue;
         }
 
         RECT itemRc = { 0, iy, menuW, iy + itemH };
-        FillRect(hdc, &itemRc, menuBg);
+        FillRect(hdc, &itemRc, menuBg.h);
 
         if (item.id == 0) {
             SelectObject(hdc, m_fontBold);
@@ -1145,9 +1220,7 @@ void TaskbarWindow::ShowStartMenu(int screenX, int screenY) {
     }
 
     DestroyWindow(hMenuWnd);
-    DeleteObject(menuBg);
-    DeleteObject(menuHover);
-    DeleteObject(menuBorder);
+    // menuBg/menuHover/menuBorder 由 Scoped* 自动清理
 }
 
 void TaskbarWindow::ShowTaskbarContextMenu(int screenX, int screenY) {
@@ -1760,7 +1833,18 @@ LRESULT CALLBACK TaskbarWindow::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
-        if (self) self->DrawTaskbar(hdc, ps.rcPaint);
+        if (self) {
+            // 双缓冲绘制（消除闪烁）
+            ShellEnh::DoubleBuffer db;
+            if (db.SmartBegin(hdc, &ps.rcPaint)) {
+                HDC hdcDraw = db.GetHDC();
+                if (!hdcDraw) hdcDraw = hdc; // 回退
+                self->DrawTaskbar(hdcDraw, ps.rcPaint);
+                db.SmartEnd();
+            } else {
+                self->DrawTaskbar(hdc, ps.rcPaint);
+            }
+        }
         EndPaint(hWnd, &ps);
         return 0;
     }
@@ -1793,6 +1877,36 @@ LRESULT CALLBACK TaskbarWindow::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
         if (wParam == 1) ShellExecuteW(hWnd, L"open", L"MainUI.exe", nullptr, nullptr, SW_SHOW);
         else if (wParam == 2 && self) self->ToggleDesktop();
         return 0;
+    case WM_APP + 100: { // AppBar 回调
+        LRESULT appResult = 0;
+        if (g_appBar.HandleMessage(WM_APP + 100, wParam, lParam, &appResult)) {
+            return appResult;
+        }
+        return 0;
+    }
+    case WM_DPICHANGED: {
+        // DPI 变化时重新计算尺寸
+        if (self) {
+            int newDpi = HIWORD(wParam);
+            self->m_dpi = newDpi;
+            self->m_taskbarHeight = self->Scale(40);
+            self->m_buttonWidth = self->Scale(48);
+
+            // 更新 AppBar 厚度
+            g_appBar.SetThickness(self->m_taskbarHeight);
+            g_appBar.Update();
+
+            // 调整窗口位置
+            RECT* prc = (RECT*)lParam;
+            if (prc) {
+                SetWindowPos(hWnd, nullptr,
+                    prc->left, prc->top,
+                    prc->right - prc->left, prc->bottom - prc->top,
+                    SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+        }
+        return 0;
+    }
     case WM_USER + 1: return 0;
     case WM_USER + 2:
         if (self) {
@@ -1824,7 +1938,17 @@ LRESULT CALLBACK TaskbarWindow::CalendarWndProc(HWND hWnd, UINT msg, WPARAM wPar
         HDC hdc = BeginPaint(hWnd, &ps);
         RECT rc;
         GetClientRect(hWnd, &rc);
-        if (self) self->DrawCalendarFlyout(hWnd, hdc, rc);
+        if (self) {
+            ShellEnh::DoubleBuffer db;
+            if (db.SmartBegin(hdc, &ps.rcPaint)) {
+                HDC hdcDraw = db.GetHDC();
+                if (!hdcDraw) hdcDraw = hdc;
+                self->DrawCalendarFlyout(hWnd, hdcDraw, rc);
+                db.SmartEnd();
+            } else {
+                self->DrawCalendarFlyout(hWnd, hdc, rc);
+            }
+        }
         EndPaint(hWnd, &ps);
         return 0;
     }
@@ -1860,7 +1984,17 @@ LRESULT CALLBACK TaskbarWindow::TrayFlyoutWndProc(HWND hWnd, UINT msg, WPARAM wP
         HDC hdc = BeginPaint(hWnd, &ps);
         RECT rc;
         GetClientRect(hWnd, &rc);
-        if (self) self->DrawTrayFlyout(hWnd, hdc, rc);
+        if (self) {
+            ShellEnh::DoubleBuffer db;
+            if (db.SmartBegin(hdc, &ps.rcPaint)) {
+                HDC hdcDraw = db.GetHDC();
+                if (!hdcDraw) hdcDraw = hdc;
+                self->DrawTrayFlyout(hWnd, hdcDraw, rc);
+                db.SmartEnd();
+            } else {
+                self->DrawTrayFlyout(hWnd, hdc, rc);
+            }
+        }
         EndPaint(hWnd, &ps);
         return 0;
     }
@@ -1936,7 +2070,17 @@ LRESULT CALLBACK TaskbarWindow::PopupMenuWndProc(HWND hWnd, UINT msg, WPARAM wPa
         HDC hdc = BeginPaint(hWnd, &ps);
         RECT rc;
         GetClientRect(hWnd, &rc);
-        if (self) self->DrawPopupMenu(hWnd, hdc, rc);
+        if (self) {
+            ShellEnh::DoubleBuffer db;
+            if (db.SmartBegin(hdc, &ps.rcPaint)) {
+                HDC hdcDraw = db.GetHDC();
+                if (!hdcDraw) hdcDraw = hdc;
+                self->DrawPopupMenu(hWnd, hdcDraw, rc);
+                db.SmartEnd();
+            } else {
+                self->DrawPopupMenu(hWnd, hdc, rc);
+            }
+        }
         EndPaint(hWnd, &ps);
         return 0;
     }

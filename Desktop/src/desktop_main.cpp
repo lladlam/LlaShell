@@ -1,4 +1,5 @@
 #include "desktop.h"
+#include "shell_enhancements.h"
 #include <shellapi.h>
 #include <shlobj.h>
 #include <algorithm>
@@ -171,9 +172,7 @@ void DesktopWindow::ScanDesktopFolder() {
 }
 
 void DesktopWindow::RenderIcons(HDC hdc, const RECT& rc) {
-    HBRUSH bgBrush = CreateSolidBrush(RGB(30, 30, 46));
-    FillRect(hdc, &rc, bgBrush);
-    DeleteObject(bgBrush);
+    FillRect(hdc, &rc, m_bgBrush);
 
     std::lock_guard<std::mutex> lock(m_iconMutex);
 
@@ -333,7 +332,17 @@ LRESULT CALLBACK DesktopWindow::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
-        if (self) self->RenderIcons(hdc, ps.rcPaint);
+        if (self) {
+            ShellEnh::DoubleBuffer db;
+            if (db.SmartBegin(hdc, &ps.rcPaint)) {
+                HDC hdcDraw = db.GetHDC();
+                if (!hdcDraw) hdcDraw = hdc;
+                self->RenderIcons(hdcDraw, ps.rcPaint);
+                db.SmartEnd();
+            } else {
+                self->RenderIcons(hdc, ps.rcPaint);
+            }
+        }
         EndPaint(hWnd, &ps);
         return 0;
     }
@@ -383,6 +392,7 @@ LRESULT CALLBACK DesktopWindow::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    ShellEnh::EnablePerMonitorDpi();
 
     LlaShell::DesktopWindow desktop;
     if (!desktop.Create(hInstance)) return 1;
