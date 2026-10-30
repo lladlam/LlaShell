@@ -22,6 +22,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        # 必须在调用 cl 之前：把 cl.exe/link.exe 加入 PATH，CMake 检测到 MSVC
+
       - name: Record environment
         shell: pwsh
         run: |
@@ -32,14 +36,9 @@ jobs:
           Write-Host "Working tree:"
           git status --porcelain
           Write-Host "=== MSVC / SDK versions ==="
-          # ilammy/msvc-dev-cmd 会把 cl 加入 PATH
           cl 2>&1 | Select-Object -First 1
           Write-Host "Windows SDK:"
           (Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' -Directory -ErrorAction SilentlyContinue).Name
-
-      - name: Setup MSVC environment
-        uses: ilammy/msvc-dev-cmd@v1
-        # 提供 cl.exe / link.exe 到 PATH，CMake 检测到 MSVC
 
       - name: Configure (CMake)
         shell: pwsh
