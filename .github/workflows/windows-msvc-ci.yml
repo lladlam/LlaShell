@@ -1,0 +1,74 @@
+name: Windows MSVC CI
+
+# Phase 0 基线：在 GitHub 托管的 Windows runner 上用真实 MSVC 构建
+# 目的：可重复构建验证 + 编译断裂确认（本机 Linux 无法满足 MSVC 验证要求）
+on:
+  push:
+    branches: [ refactor/shell-core-v2-phase0 ]
+  pull_request:
+    branches: [ refactor/shell-core-v2-phase0 ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: MSVC x64 ${{ matrix.config }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [Debug, Release]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Record environment
+        shell: pwsh
+        run: |
+          Write-Host "=== Runner environment ==="
+          Write-Host "Image: $env:ImageOS $env:ImageVersion"
+          Write-Host "HEAD: $(git rev-parse HEAD)"
+          Write-Host "Branch: $(git rev-parse --abbrev-ref HEAD)"
+          Write-Host "Working tree:"
+          git status --porcelain
+          Write-Host "=== MSVC / SDK versions ==="
+          # ilammy/msvc-dev-cmd 会把 cl 加入 PATH
+          cl 2>&1 | Select-Object -First 1
+          Write-Host "Windows SDK:"
+          (Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' -Directory -ErrorAction SilentlyContinue).Name
+
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        # 提供 cl.exe / link.exe 到 PATH，CMake 检测到 MSVC
+
+      - name: Configure (CMake)
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G "Ninja" `
+            -DCMAKE_BUILD_TYPE=${{ matrix.config }}
+          if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
+
+      - name: Build (Ninja)
+        shell: pwsh
+        run: |
+          cmake --build build --config ${{ matrix.config }} --parallel 4 2>&1 |
+            Tee-Object -FilePath build-${{ matrix.config }}.log
+          if ($LASTEXITCODE -ne 0) { throw "Build failed — see build-${{ matrix.config }}.log" }
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: msvc-build-log-${{ matrix.config }}
+          path: build-${{ matrix.config }}.log
+          if-no-files-found: ignore
+
+      - name: Upload binaries
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: llashell-binaries-${{ matrix.config }}
+          path: |
+            build/**/*.exe
+            build/**/*.dll
+          if-no-files-found: warn
